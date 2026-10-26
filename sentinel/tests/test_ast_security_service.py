@@ -151,3 +151,54 @@ def test_several_findings_in_one_file_are_all_reported():
     findings = ast_service.analyze_source(source, "a.py")
     assert {f.rule for f in findings} == {"hardcoded_secret", "os_system_call", "sql_injection"}
     assert [f.line for f in sorted(findings, key=lambda f: f.line)] == [1, 2, 3]
+
+
+# --- Credential shapes: coverage the name heuristic cannot give ---------------
+
+
+def test_credential_literals_are_caught_regardless_of_variable_name():
+    """`key` is too generic to treat as a secret word, so shape has to carry it.
+
+    This is not optional polish: a file handled by this engine is withheld from
+    the regex engine entirely, so anything missed here is missed by everything.
+    """
+    assert "aws_access_key" in rules('aws_key = "AKIAIOSFODNN7EXAMPLE"\n')
+    assert "aws_access_key" in rules('cfg = {"k": "AKIAIOSFODNN7EXAMPLE"}\n')
+    assert "openai_key" in rules('client = make("sk-abcdefghijklmnopqrstuvwx")\n')
+    assert "github_token" in rules('t = "ghp_abcdefghijklmnopqrstuvwxyz0123"\n')
+
+
+def test_a_named_credential_is_reported_once_not_twice():
+    """Name and shape both match here; the finding must not be duplicated."""
+    findings = ast_service.analyze_source('api_key = "sk-abcdefghijklmnopqrstuvwx"\n', "a.py")
+    assert len(findings) == 1
+
+
+def test_ordinary_long_strings_are_not_credentials():
+    assert rules('msg = "the quick brown fox jumps over the lazy dog"\n') == set()
+    assert rules('path = "/usr/local/share/some/long/directory/name"\n') == set()
+
+
+def test_every_regex_secret_rule_is_still_covered_by_the_ast_engine():
+    """Guards the handover: AST must not lose ground the regex engine held.
+
+    If a future rule is added to SecurityService without an AST counterpart,
+    files claimed by the AST engine would silently stop reporting it.
+    """
+    samples = {
+        "openai_key": 'x = "sk-abcdefghijklmnopqrstuvwx"',
+        "aws_access_key": 'x = "AKIAIOSFODNN7EXAMPLE"',
+        "api_key_assignment": 'api_key = "literal-value-here"',
+        "password_assignment": 'password = "literal-value-here"',
+        "eval_call": "eval(user_input)",
+        "exec_call": "exec(user_input)",
+        "os_system_call": "os.system(user_cmd)",
+        "subprocess_shell_true": "subprocess.run(user_cmd, shell=True)",
+        "sql_injection": 'q = f"SELECT * FROM t WHERE i={i}"',
+    }
+    for regex_rule, source in samples.items():
+        caught_by_regex = regex_rule in regex_rules(source)
+        caught_by_ast = bool(rules(source))
+        assert not caught_by_regex or caught_by_ast, (
+            f"regex catches {regex_rule!r} in {source!r} but the AST engine reports nothing"
+        )
