@@ -113,7 +113,14 @@ def test_production_with_webhook_secret_starts():
     from main import verify_startup_config
 
     settings = _settings(
-        ENVIRONMENT="production", ENABLE_GITHUB="true", GITHUB_WEBHOOK_SECRET="s3cret"
+        ENVIRONMENT="production",
+        ENABLE_GITHUB="true",
+        GITHUB_WEBHOOK_SECRET="s3cret",
+        # Startup also refuses to boot without credentials, so a test asserting
+        # that it STARTS has to supply them. They are not ambient: conftest
+        # clears them precisely so this cannot pass on a developer's .env.
+        GITHUB_APP_ID="12345",
+        GITHUB_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\nx\n",
     )
     verify_startup_config(settings)  # must not raise
 

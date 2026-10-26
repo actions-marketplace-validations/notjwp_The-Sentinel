@@ -143,9 +143,17 @@ def test_no_quota_object_when_the_cap_is_unset(monkeypatch):
 
 
 def test_quota_object_is_built_when_both_are_set(monkeypatch):
+    # Resolved here rather than at module scope on purpose. The builder imports
+    # the class lazily (so the Action can run without redis installed), and the
+    # circular-import guard purges and re-imports sentinel modules mid-session —
+    # so a class captured at collection time can be a genuinely different object
+    # from the one the builder returns, and isinstance fails on two classes with
+    # the same name.
+    from sentinel.infrastructure.redis.redis_llm_quota import RedisLLMQuota as Current
+
     monkeypatch.setenv("REDIS_URL", "redis://127.0.0.1:6379/0")
     monkeypatch.setenv("LLM_DAILY_QUOTA", "10")
-    assert isinstance(bw_module._build_llm_quota(get_settings()), RedisLLMQuota)
+    assert isinstance(bw_module._build_llm_quota(get_settings()), Current)
 
 
 def test_an_exhausted_budget_marks_the_job_and_is_counted():

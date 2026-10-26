@@ -48,9 +48,12 @@ jobs:
   # uvicorn, no redis. This proves the entrypoint still imports under it — an
   # accidental server-side import would otherwise only surface in a consumer's
   # repository, which is the worst place to find out.
+  # No `needs: test`. Gating this on the suite meant that the first time a
+  # server-only import leaked into the action's path, the test job failed for
+  # an unrelated reason, this job was skipped, and the leak reached the PR
+  # unreported. It checks a different property; it runs independently.
   action-smoke:
     runs-on: ubuntu-latest
-    needs: test
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

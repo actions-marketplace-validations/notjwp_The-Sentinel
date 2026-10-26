@@ -3,6 +3,10 @@ import contextlib
 import sys
 import time
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from sentinel.infrastructure.redis.redis_llm_quota import RedisLLMQuota
 
 from sentinel.application.audit_orchestrator import AuditOrchestrator
 from sentinel.application.risk_engine import RiskEngine
@@ -14,7 +18,6 @@ from sentinel.domain.services.semantic_service import SemanticService
 from sentinel.domain.value_objects.severity_level import SeverityLevel
 from sentinel.infrastructure.github.github_client import GitHubClient
 from sentinel.infrastructure.llm.llm_service import LLMService
-from sentinel.infrastructure.redis.redis_llm_quota import RedisLLMQuota
 from sentinel.infrastructure.semantic.embedding_engine import EmbeddingEngine
 from sentinel.monitoring.logger import get_logger
 from sentinel.monitoring.metrics import metrics
@@ -101,9 +104,17 @@ def _build_llm_quota(settings: Settings) -> "RedisLLMQuota | None":
     configured, or no Redis, enrichment is simply never withheld.
 
     Module-scope seam, like the other builders, so tests can inject a fake.
+
+    The import is deferred because this module is also imported by the GitHub
+    Action, which installs a narrower dependency set with no ``redis`` in it —
+    a module-level import here makes the whole Action fail to start over a
+    feature it can never use.
     """
     if settings.LLM_DAILY_QUOTA <= 0 or not settings.REDIS_URL:
         return None
+
+    from sentinel.infrastructure.redis.redis_llm_quota import RedisLLMQuota
+
     return RedisLLMQuota(settings.REDIS_URL, daily_quota=settings.LLM_DAILY_QUOTA)
 
 

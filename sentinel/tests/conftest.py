@@ -28,6 +28,12 @@ _POSTURE_VARS = (
     # no installation of its own, so a developer with one in `.env` would see
     # the fallback tests pass locally and fail in CI, where it is unset.
     "GITHUB_INSTALLATION_ID",
+    # These two became posture the moment startup began refusing to boot
+    # without them. Leaving them ambient meant a developer's .env satisfied
+    # the check and CI, which has no .env, did not — the suite passing locally
+    # for a reason that does not exist on the runner.
+    "GITHUB_APP_ID",
+    "GITHUB_PRIVATE_KEY",
 )
 
 
