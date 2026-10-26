@@ -1084,3 +1084,46 @@ def test_corpus_cache_is_keyed_by_preference(monkeypatch):
     assert calls["n"] == first, "identical preference should hit the cache"
     client.get_repo_code_corpus("o", "r", "sha", prefer_paths=["b/y.py"])
     assert calls["n"] > first, "a different preference must not reuse the cache"
+
+
+# --- Token auth: the same client, running under a GitHub Action --------------
+
+
+def test_access_token_short_circuits_the_app_jwt_exchange(monkeypatch):
+    """A supplied token IS the credential: nothing is signed, nothing minted."""
+    client = GitHubClient.from_access_token("ghs_supplied")
+    monkeypatch.setattr(
+        client, "_build_app_jwt", lambda: pytest.fail("must not sign an App JWT")
+    )
+
+    assert client._get_installation_token() == "ghs_supplied"
+
+
+def test_from_access_token_carries_no_app_credentials():
+    client = GitHubClient.from_access_token("ghs_supplied")
+    assert (client.app_id, client.installation_id, client.private_key) == (None, None, None)
+
+
+def test_access_token_authorises_with_the_token_scheme(monkeypatch):
+    """GitHub's `token` scheme is what a GITHUB_TOKEN uses; Bearer is for the JWT."""
+    seen = {}
+
+    def fake_http_json(method, url, headers, data=None):
+        seen.update(headers)
+        return {"id": 1}
+
+    client = GitHubClient.from_access_token("ghs_supplied")
+    monkeypatch.setattr(client, "_http_json", fake_http_json)
+
+    client.post_comment("o", "r", 1, "body")
+
+    assert seen["Authorization"] == "token ghs_supplied"
+
+
+def test_the_app_path_is_unchanged_when_no_access_token_is_set(monkeypatch):
+    """An explicit guard, so a refactor cannot quietly invert the branch."""
+    client = _client()
+    assert client.access_token is None
+
+    _patch_imports(monkeypatch, response_payload=b'{"token": "minted", "expires_at": ""}')
+    assert client._get_installation_token() == "minted"

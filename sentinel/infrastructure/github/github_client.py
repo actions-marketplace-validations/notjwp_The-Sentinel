@@ -27,6 +27,12 @@ class GitHubClient:
     private_key: str | None
     api_base_url: str = "https://api.github.com"
     timeout: float = 10.0
+    # A ready-made token, used INSTEAD of the App JWT exchange. This is what a
+    # GitHub Action has: the runner is handed a GITHUB_TOKEN scoped to the one
+    # repository, so there is no app to authenticate as and no installation to
+    # exchange for. Defaulted and last, so every existing construction is
+    # unaffected.
+    access_token: str | None = None
 
     # Transient statuses worth another attempt. 403 is deliberately absent: it is
     # usually a permission problem, and only retried when it carries throttling
@@ -60,6 +66,29 @@ class GitHubClient:
 
     # Unified-diff hunk header: '@@ -old_start,old_count +new_start,new_count @@'.
     _HUNK_HEADER_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+
+    @classmethod
+    def from_access_token(
+        cls,
+        access_token: str,
+        *,
+        api_base_url: str = "https://api.github.com",
+        timeout: float = 10.0,
+    ) -> "GitHubClient":
+        """A client authenticated by a supplied token rather than as a GitHub App.
+
+        This is the GitHub Action's constructor: the runner hands the job a
+        token already scoped to the one repository, so there is no app to sign
+        as and no installation to exchange.
+        """
+        return cls(
+            app_id=None,
+            installation_id=None,
+            private_key=None,
+            api_base_url=api_base_url,
+            timeout=timeout,
+            access_token=access_token,
+        )
 
     def __post_init__(self) -> None:
         self._installation_token: str | None = None
@@ -272,6 +301,13 @@ class GitHubClient:
         return results
 
     def _get_installation_token(self) -> str | None:
+        # A supplied token wins outright: there is nothing to mint, nothing to
+        # cache and nothing to expire. Every caller goes through here, so this
+        # one branch is what lets the whole client run under an Action's
+        # GITHUB_TOKEN without a second code path.
+        if self.access_token:
+            return self.access_token
+
         if self._installation_token and self._now() < (self._installation_token_expiry - 30):
             return self._installation_token
 
