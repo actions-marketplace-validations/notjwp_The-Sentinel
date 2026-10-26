@@ -165,6 +165,31 @@ def _extract_files(raw_payload: dict[str, Any], fallback_files: list[str] | None
     return files
 
 
+def _extract_installation_id(raw_payload: dict[str, Any]) -> str | None:
+    """Which App installation this delivery belongs to.
+
+    Every GitHub App delivery carries it, and it decides WHOSE credentials the
+    worker reviews with. Without it the worker falls back to the single id in
+    the environment, which is correct only for the one installation that
+    happens to be configured — anyone else's pull request would be fetched with
+    the wrong token and fail every call, silently.
+
+    GitHub sends it as an int and the client interpolates it into a URL, so it
+    is normalized to ``str`` here. ``bool`` is rejected explicitly because it is
+    a subclass of ``int``.
+    """
+    installation = _as_dict(raw_payload.get("installation"))
+    installation_id = installation.get("id")
+
+    if isinstance(installation_id, bool):
+        return None
+    if isinstance(installation_id, int):
+        return str(installation_id)
+    if isinstance(installation_id, str) and installation_id.strip() != "":
+        return installation_id.strip()
+    return None
+
+
 def _build_job(raw_payload: dict[str, Any], payload: WebhookPayload) -> dict[str, Any]:
     """Resolve a delivery into the job the worker needs: who, which repo, which PR.
 
@@ -179,6 +204,7 @@ def _build_job(raw_payload: dict[str, Any], payload: WebhookPayload) -> dict[str
     pr_number = _extract_pr_number(raw_payload, payload.pr_number)
     author = _extract_author(raw_payload, payload.author)
     files = _extract_files(raw_payload, payload.files)
+    installation_id = _extract_installation_id(raw_payload)
 
     if repo_name is not None:
         job["repo"] = repo_name
@@ -190,6 +216,8 @@ def _build_job(raw_payload: dict[str, Any], payload: WebhookPayload) -> dict[str
         job["author"] = author
     if files:
         job["files"] = files
+    if installation_id is not None:
+        job["installation_id"] = installation_id
     return job
 
 

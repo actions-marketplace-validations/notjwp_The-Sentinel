@@ -24,6 +24,10 @@ _POSTURE_VARS = (
     "GITHUB_WEBHOOK_SECRET",
     "METRICS_TOKEN",
     "ENVIRONMENT",
+    # Not a gate, but the same trap: it is the fallback used when a job carries
+    # no installation of its own, so a developer with one in `.env` would see
+    # the fallback tests pass locally and fail in CI, where it is unset.
+    "GITHUB_INSTALLATION_ID",
 )
 
 

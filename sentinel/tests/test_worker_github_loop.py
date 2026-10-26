@@ -131,7 +131,7 @@ def test_worker_fetches_pr_code_and_posts_structured_review(monkeypatch, capsys)
 
     # Vulnerable code the worker will only ever see by fetching it from GitHub.
     fake = _FakeGitHub('password = "hunter2"\napi_key = "sk-abcdefghijklmnopqrst"')
-    monkeypatch.setattr(bw_module, "_build_github_client", lambda settings: fake)
+    monkeypatch.setattr(bw_module, "_build_github_client", lambda settings, installation_id=None: fake)
     monkeypatch.setattr(bw_module, "_build_llm_service", lambda settings: _FakeLLM())
 
     async def _seed(queue: JobQueue) -> None:
@@ -164,7 +164,7 @@ def test_worker_fetches_pr_code_and_posts_structured_review(monkeypatch, capsys)
 def test_worker_splits_owner_repo_from_full_name(monkeypatch, capsys):
     """When repo arrives as 'owner/name', the worker calls GitHub with the bare name."""
     fake = _FakeGitHub("x = 1")
-    monkeypatch.setattr(bw_module, "_build_github_client", lambda settings: fake)
+    monkeypatch.setattr(bw_module, "_build_github_client", lambda settings, installation_id=None: fake)
 
     async def _seed(queue: JobQueue) -> None:
         # owner separate, repo carries the full "owner/name" form.
@@ -184,7 +184,7 @@ def test_worker_splits_owner_repo_from_full_name(monkeypatch, capsys):
 def test_worker_skips_github_when_no_owner(monkeypatch, capsys):
     """Owner-less (flat/manual) jobs neither fetch nor post — no regression."""
     fake = _FakeGitHub('password = "leak"')
-    monkeypatch.setattr(bw_module, "_build_github_client", lambda settings: fake)
+    monkeypatch.setattr(bw_module, "_build_github_client", lambda settings, installation_id=None: fake)
 
     real_sleep = asyncio.sleep
 
@@ -225,7 +225,7 @@ def test_worker_review_includes_documentation_findings(monkeypatch, capsys):
         files=["README.md"],
         file_contents={"README.md": "notes only"},  # lacks install + usage guidance
     )
-    monkeypatch.setattr(bw_module, "_build_github_client", lambda settings: fake)
+    monkeypatch.setattr(bw_module, "_build_github_client", lambda settings, installation_id=None: fake)
     monkeypatch.setattr(bw_module, "_build_llm_service", lambda settings: _FakeLLM())
 
     async def _seed(queue: JobQueue) -> None:
@@ -265,7 +265,7 @@ def test_worker_semantic_corpus_flags_duplicate_code(monkeypatch, capsys):
         "    return text.split(sep, limit)\n"
     )
     fake = _FakeGitHub(pr_code, corpus=[corpus_file])
-    monkeypatch.setattr(bw_module, "_build_github_client", lambda settings: fake)
+    monkeypatch.setattr(bw_module, "_build_github_client", lambda settings, installation_id=None: fake)
     monkeypatch.setattr(bw_module, "_build_llm_service", lambda settings: _FakeLLM())
 
     async def _seed(queue: JobQueue) -> None:
@@ -294,7 +294,7 @@ def test_worker_posts_check_run_with_line_mapped_annotations(monkeypatch, capsys
     """
     code = 'password = "hunter2"\napi_key = "sk-abcdefghijklmnopqrst"'
     fake = _FakeGitHub(code, line_map=[("app.py", 14), ("app.py", 15)])
-    monkeypatch.setattr(bw_module, "_build_github_client", lambda settings: fake)
+    monkeypatch.setattr(bw_module, "_build_github_client", lambda settings, installation_id=None: fake)
     monkeypatch.setattr(bw_module, "_build_llm_service", lambda settings: _FakeLLM())
 
     async def _seed(queue: JobQueue) -> None:
@@ -329,7 +329,7 @@ def test_worker_records_metrics(monkeypatch, capsys):
 
     metrics.reset()
     fake = _FakeGitHub('password = "hunter2"')
-    monkeypatch.setattr(bw_module, "_build_github_client", lambda settings: fake)
+    monkeypatch.setattr(bw_module, "_build_github_client", lambda settings, installation_id=None: fake)
     monkeypatch.setattr(bw_module, "_build_llm_service", lambda settings: _FakeLLM())
 
     real_sleep = asyncio.sleep
@@ -370,7 +370,7 @@ def test_worker_skips_check_run_when_flag_off(monkeypatch, capsys):
     """ENABLE_CHECKS=false: the comment posts, no check run is created."""
     monkeypatch.setenv("ENABLE_CHECKS", "false")
     fake = _FakeGitHub('password = "leak"')
-    monkeypatch.setattr(bw_module, "_build_github_client", lambda settings: fake)
+    monkeypatch.setattr(bw_module, "_build_github_client", lambda settings, installation_id=None: fake)
     monkeypatch.setattr(bw_module, "_build_llm_service", lambda settings: _FakeLLM())
 
     async def _seed(queue: JobQueue) -> None:
@@ -473,7 +473,7 @@ def test_failed_fetch_posts_a_neutral_check_and_no_review(monkeypatch, capsys):
 
     metrics.reset()
     fake = _FailingGitHub("never returned")
-    monkeypatch.setattr(bw_module, "_build_github_client", lambda settings: fake)
+    monkeypatch.setattr(bw_module, "_build_github_client", lambda settings, installation_id=None: fake)
     monkeypatch.setattr(bw_module, "_build_llm_service", lambda settings: _FakeLLM())
 
     async def _seed(queue: JobQueue) -> None:
@@ -516,7 +516,7 @@ def test_docs_only_pr_is_still_reviewed(monkeypatch, capsys):
         files=["README.md"],
         file_contents={"README.md": "notes only"},
     )
-    monkeypatch.setattr(bw_module, "_build_github_client", lambda settings: fake)
+    monkeypatch.setattr(bw_module, "_build_github_client", lambda settings, installation_id=None: fake)
     monkeypatch.setattr(bw_module, "_build_llm_service", lambda settings: _FakeLLM())
 
     async def _seed(queue: JobQueue) -> None:

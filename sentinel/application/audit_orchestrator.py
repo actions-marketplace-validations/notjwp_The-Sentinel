@@ -68,6 +68,11 @@ class AuditOrchestrator:
 
         if "owner" in payload:
             job["owner"] = payload["owner"]
+        # Which installation's credentials the worker must use. Carried on the
+        # job rather than read from the environment, because one deployment
+        # serves many installations.
+        if "installation_id" in payload:
+            job["installation_id"] = payload["installation_id"]
         if "author" in payload:
             job["author"] = payload["author"]
         if "files" in payload:

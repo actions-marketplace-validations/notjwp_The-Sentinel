@@ -2,6 +2,7 @@ import asyncio
 import contextlib
 import sys
 import time
+from dataclasses import dataclass
 
 from sentinel.application.audit_orchestrator import AuditOrchestrator
 from sentinel.application.risk_engine import RiskEngine
@@ -27,17 +28,25 @@ TARGET_LATENCY_SECONDS = 0.1
 CORPUS_MAX_UNITS = 200
 
 
-def _build_github_client(settings: Settings) -> GitHubClient | None:
-    """Build a GitHub client for the worker, or None when GitHub is disabled.
+def _build_github_client(
+    settings: Settings, installation_id: str | None = None
+) -> GitHubClient | None:
+    """Build a GitHub client for ONE installation, or None when GitHub is disabled.
 
-    Kept at module scope (mirrors webhook_controller.get_github_client) so tests can
-    monkeypatch ``bw_module._build_github_client`` to inject a fake.
+    ``installation_id`` arrives on the job, taken from the delivery that queued
+    it, so a single deployment can serve every installation of the App. It
+    falls back to the configured id, which is what keeps manual triggers and
+    the e2e harness — neither of which carries a real delivery — working
+    unchanged.
+
+    Kept at module scope so tests can monkeypatch ``bw_module._build_github_client``
+    to inject a fake.
     """
     if not settings.ENABLE_GITHUB:
         return None
     return GitHubClient(
         app_id=settings.GITHUB_APP_ID,
-        installation_id=settings.GITHUB_INSTALLATION_ID,
+        installation_id=installation_id or settings.GITHUB_INSTALLATION_ID,
         private_key=settings.GITHUB_PRIVATE_KEY,
         api_base_url=settings.GITHUB_API_BASE_URL,
     )
@@ -63,6 +72,26 @@ def _build_llm_service(settings: Settings) -> LLMService:
     )
 
 
+@dataclass(frozen=True)
+class ReviewOutcome:
+    """What one review produced.
+
+    ``severity`` is None when the review was skipped (the PR data could not be
+    fetched), which is deliberately distinct from a LOW verdict: one means
+    "looked, found little", the other "could not look". ``report`` is the
+    markdown body, kept so a caller that is not posting a comment — the GitHub
+    Action writing a job summary — does not have to rebuild it and pay for the
+    LLM calls twice.
+    """
+
+    severity: SeverityLevel | None = None
+    report: str | None = None
+
+    @property
+    def skipped(self) -> bool:
+        return self.severity is None
+
+
 def _safe_assessment() -> dict:
     """Assessment-shaped defaults, used when risk analysis fails outright."""
     return {
@@ -83,11 +112,43 @@ class BackgroundWorker:
     # spin when dequeue() itself keeps raising (e.g. Redis unreachable).
     ERROR_BACKOFF_SECONDS = 2.0
 
+    # Upper bound on cached per-installation clients. Each one holds an access
+    # token and a small corpus cache, so the cap is what stops a widely
+    # installed App from growing them without limit.
+    MAX_CACHED_CLIENTS = 32
+
     def __init__(self, queue: JobQueue) -> None:
         self.queue = queue
         # Count of jobs whose processing has fully completed. Deterministic completion
         # signal (used by tests) and basic throughput observability.
         self.processed_count = 0
+        # One GitHub client per installation, reused across jobs. Keyed by
+        # installation id; "" is the configured-fallback client.
+        self._clients: dict[str, GitHubClient] = {}
+
+    def _client_for(self, settings: Settings, installation_id: object) -> GitHubClient | None:
+        """Resolve the GitHub client for one installation, reused across jobs.
+
+        Reuse is the point: the installation token is cached on the client, so
+        building a fresh one per job would mint a new token for every pull
+        request. A job with no installation id (manual trigger, e2e harness)
+        maps to the empty key and gets the configured fallback client.
+        """
+        key = str(installation_id) if installation_id else ""
+
+        cached = self._clients.get(key)
+        if cached is not None:
+            return cached
+
+        client = _build_github_client(settings, key or None)
+        if client is None:
+            return None
+
+        self._clients[key] = client
+        if len(self._clients) > self.MAX_CACHED_CLIENTS:
+            # A plain dict keeps insertion order, so the first key is the oldest.
+            del self._clients[next(iter(self._clients))]
+        return client
 
     @staticmethod
     def _format_risk_line(pr_number: object, risk: object) -> str:
@@ -369,13 +430,19 @@ class BackgroundWorker:
         assessment: dict,
         orchestrator: AuditOrchestrator,
         github_client: GitHubClient | None,
-    ) -> None:
-        """Build a structured report from the assessment and post it. Failure-safe."""
+    ) -> str | None:
+        """Build a structured report from the assessment and post it. Failure-safe.
+
+        Returns the report body when one was built, so a caller can surface it
+        somewhere other than a PR comment. Posting may have failed even when a
+        report comes back — that is the fork-PR case, where the token is
+        read-only but the review itself is perfectly valid.
+        """
         if github_client is None:
-            return
+            return None
         owner, repo_name, pr_number = BackgroundWorker._identity(job)
         if not owner or not repo_name or pr_number is None:
-            return
+            return None
         try:
             security = assessment.get("security", {})
             findings = security.get("findings", []) if isinstance(security, dict) else []
@@ -429,8 +496,10 @@ class BackgroundWorker:
                     repo_name,
                     pr_number,
                 )
+            return report
         except Exception:
             logger.exception("Failed to post PR review for repo=%s pr=%s", repo_name, pr_number)
+            return None
 
     @staticmethod
     def _post_fetch_failure(job: dict, github_client: GitHubClient | None) -> None:
@@ -481,50 +550,8 @@ class BackgroundWorker:
         orchestrator: AuditOrchestrator,
         github_client: GitHubClient | None,
     ) -> None:
-        """Run one job's full blocking pipeline: fetch -> assess -> emit -> post.
-
-        Entirely synchronous/blocking (GitHub urllib + sklearn + openai). ``start``
-        runs it via ``asyncio.to_thread`` so none of it executes on the event loop.
-        """
-        start_time = time.monotonic()
-
-        # A failed fetch must never look like a clean PR: assessing the empty
-        # code we did not manage to fetch would report "no issues" and a passing
-        # check run. Say nothing about the code; say the review was skipped.
-        if not self._fetch_pr_data(job, github_client):
-            pr_number = job.get("pr_number")
-            skipped_line = f"PR #{pr_number} Risk: SKIPPED (fetch failed)"
-            metrics.counter_inc("sentinel_reviews_skipped_total", {"reason": "fetch_failed"})
-            logger.warning("%s", skipped_line)
-            sys.stdout.write(f"{skipped_line}\n")
-            sys.stdout.flush()
-            self._post_fetch_failure(job, github_client)
-            metrics.observe("sentinel_job_duration_seconds", time.monotonic() - start_time)
-            return
-
-        # Structure-aware analysis first: it claims the files it can parse, and
-        # those lines are then withheld from the text-matching engine so a single
-        # line is never reported by both.
-        ast_findings = self._ast_security_findings(job)
-        self._strip_ast_covered_lines(job)
-
-        pull_request, assessment = self._assess(job, risk_engine, ast_findings)
-        risk = assessment["severity"]
-        report_line = self._format_risk_line(pull_request.pr_number, risk)
-        metrics.counter_inc(
-            "sentinel_reviews_total",
-            {"severity": risk.value if isinstance(risk, SeverityLevel) else str(risk).upper()},
-        )
-
-        logger.info("%s", report_line)
-        sys.stdout.write(f"{report_line}\n")
-        sys.stdout.flush()
-
-        self._post_review(job, assessment, orchestrator, github_client)
-
-        elapsed = time.monotonic() - start_time
-        metrics.observe("sentinel_job_duration_seconds", elapsed)
-        logger.info("Processed job in %.4fs", elapsed)
+        """Run one job through the review pipeline. See ``run_review``."""
+        run_review(job, risk_engine, orchestrator, github_client)
 
     async def start(self) -> None:
         embedding_engine = EmbeddingEngine()
@@ -532,7 +559,6 @@ class BackgroundWorker:
         risk_engine = RiskEngine(semantic_service=semantic_service)
 
         settings = get_settings()
-        github_client = _build_github_client(settings)
         llm_service = _build_llm_service(settings)
         orchestrator = AuditOrchestrator(
             self.queue,
@@ -550,6 +576,10 @@ class BackgroundWorker:
         while True:
             try:
                 job = await self.queue.dequeue()
+                # Resolved per job, not once per process: each installation
+                # needs its own credentials, and the wrong token fetches
+                # nothing and posts nothing.
+                github_client = self._client_for(settings, job.get("installation_id"))
                 # Shielded so a shutdown mid-job lets that job finish and ack
                 # instead of being abandoned unacked. The shield alone would
                 # return control immediately and orphan the inner task, so the
@@ -587,3 +617,59 @@ class BackgroundWorker:
         await self.queue.ack(job)
         self.processed_count += 1
         metrics.counter_inc("sentinel_jobs_processed_total")
+
+
+def run_review(
+    job: dict,
+    risk_engine: RiskEngine,
+    orchestrator: AuditOrchestrator,
+    github_client: GitHubClient | None,
+) -> ReviewOutcome:
+    """Run one job's full pipeline: fetch -> assess -> emit -> post.
+
+    Entirely synchronous/blocking (GitHub urllib + sklearn + openai). The worker
+    runs it via ``asyncio.to_thread`` so none of it executes on the event loop;
+    the GitHub Action calls it directly on the runner. It lives at module scope
+    rather than on ``BackgroundWorker`` precisely so the Action can reach it
+    without constructing a worker and a queue it will never use.
+    """
+    start_time = time.monotonic()
+
+    # A failed fetch must never look like a clean PR: assessing the empty
+    # code we did not manage to fetch would report "no issues" and a passing
+    # check run. Say nothing about the code; say the review was skipped.
+    if not BackgroundWorker._fetch_pr_data(job, github_client):
+        pr_number = job.get("pr_number")
+        skipped_line = f"PR #{pr_number} Risk: SKIPPED (fetch failed)"
+        metrics.counter_inc("sentinel_reviews_skipped_total", {"reason": "fetch_failed"})
+        logger.warning("%s", skipped_line)
+        sys.stdout.write(f"{skipped_line}\n")
+        sys.stdout.flush()
+        BackgroundWorker._post_fetch_failure(job, github_client)
+        metrics.observe("sentinel_job_duration_seconds", time.monotonic() - start_time)
+        return ReviewOutcome()
+
+    # Structure-aware analysis first: it claims the files it can parse, and
+    # those lines are then withheld from the text-matching engine so a single
+    # line is never reported by both.
+    ast_findings = BackgroundWorker._ast_security_findings(job)
+    BackgroundWorker._strip_ast_covered_lines(job)
+
+    pull_request, assessment = BackgroundWorker._assess(job, risk_engine, ast_findings)
+    risk = assessment["severity"]
+    report_line = BackgroundWorker._format_risk_line(pull_request.pr_number, risk)
+    metrics.counter_inc(
+        "sentinel_reviews_total",
+        {"severity": risk.value if isinstance(risk, SeverityLevel) else str(risk).upper()},
+    )
+
+    logger.info("%s", report_line)
+    sys.stdout.write(f"{report_line}\n")
+    sys.stdout.flush()
+
+    report = BackgroundWorker._post_review(job, assessment, orchestrator, github_client)
+
+    elapsed = time.monotonic() - start_time
+    metrics.observe("sentinel_job_duration_seconds", elapsed)
+    logger.info("Processed job in %.4fs", elapsed)
+    return ReviewOutcome(severity=risk, report=report)
