@@ -43,3 +43,26 @@ jobs:
       - run: pip install ruff==0.15.21
       - name: Ruff
         run: ruff check sentinel main.py e2e.py
+
+  # The action ships a narrower dependency set than the server: no fastapi, no
+  # uvicorn, no redis. This proves the entrypoint still imports under it — an
+  # accidental server-side import would otherwise only surface in a consumer's
+  # repository, which is the worst place to find out.
+  action-smoke:
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install the action's dependency set only
+        run: |
+          pip install -r requirements-action.txt
+          pip install -e . --no-deps
+      - name: An empty context exits 2 without touching the network
+        run: |
+          set +e
+          env -u GITHUB_EVENT_PATH -u GITHUB_REPOSITORY -u GITHUB_TOKEN \
+            python -P -m sentinel.action
+          test $? -eq 2

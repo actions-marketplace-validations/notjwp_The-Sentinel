@@ -139,6 +139,9 @@ def test_no_circular_imports_in_sentinel_modules():
         "sentinel.api.health_controller",
         "sentinel.workers.job_queue",
         "sentinel.workers.background_worker",
+        "sentinel.action.context",
+        "sentinel.action.runner",
+        # Deliberately not sentinel.action.__main__: importing it runs main().
     ]
 
     for module_name in modules_to_check:

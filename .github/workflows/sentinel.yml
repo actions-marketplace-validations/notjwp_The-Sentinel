@@ -1,0 +1,30 @@
+# Sentinel reviewing its own pull requests.
+#
+# Doubles as the reference consumer workflow: anything that breaks here breaks
+# for everyone using the action, before a release rather than after.
+name: Sentinel review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read # read the diff, the tree and blobs for the semantic corpus
+  pull-requests: write # create or update the review comment
+  checks: write # create the "Sentinel AI Code Review" check run
+
+concurrency:
+  group: sentinel-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      # Needed only because the action is in this repository; a consumer
+      # writes `uses: notjwp/The-Sentinel@v1` and checks out nothing.
+      - uses: actions/checkout@v4
+      - uses: ./
+        with:
+          llm-api-key: ${{ secrets.NVIDIA_API_KEY }}
+          fail-on: never # report, don't block, on our own PRs

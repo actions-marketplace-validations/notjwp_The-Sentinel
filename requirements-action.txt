@@ -1,0 +1,8 @@
+# Runtime dependencies for the GitHub Action.
+#
+# Deliberately narrower than requirements.txt: the action runs one review and
+# exits, so it needs no web server (fastapi, uvicorn) and no durable queue
+# (redis). PyJWT is omitted too — github_client guards that import and the
+# action authenticates with a supplied token, never by signing an App JWT.
+scikit-learn==1.7.2
+openai>=2.6.1

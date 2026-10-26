@@ -1,0 +1,104 @@
+name: 'Sentinel AI Code Review'
+description: 'Security, technical-debt, documentation and duplicate-code review of a pull request.'
+branding:
+  icon: 'shield'
+  color: 'purple'
+
+inputs:
+  github-token:
+    description: 'Token used to read the pull request and post the review.'
+    required: false
+    default: ${{ github.token }}
+  fail-on:
+    description: 'Lowest severity that fails the job: critical | high | medium | low | never.'
+    required: false
+    default: 'high'
+  fail-on-error:
+    description: 'Fail the job when Sentinel itself cannot run (no PR context, fetch failed).'
+    required: false
+    default: 'true'
+  llm-api-key:
+    description: >-
+      OpenAI-compatible API key used to explain each finding and suggest a fix.
+      Omit it and the review still runs, with static recommendations.
+    required: false
+    default: ''
+  llm-base-url:
+    description: 'OpenAI-compatible endpoint. Any provider works; see .env.example.'
+    required: false
+    default: 'https://integrate.api.nvidia.com/v1'
+  llm-model:
+    description: 'Model name at that endpoint.'
+    required: false
+    default: 'deepseek-ai/deepseek-v4-flash'
+  llm-max-calls:
+    description: 'Budget of LLM calls per review.'
+    required: false
+    default: '1'
+  enable-llm:
+    description: 'Set false to skip AI enrichment entirely.'
+    required: false
+    default: 'true'
+  enable-checks:
+    description: 'Post a native check run with inline annotations. Needs checks: write.'
+    required: false
+    default: 'true'
+  enable-doc-review:
+    description: 'Review documentation files changed by the pull request.'
+    required: false
+    default: 'true'
+  python-version:
+    description: 'Python used to run the review.'
+    required: false
+    default: '3.13'
+
+outputs:
+  severity:
+    description: 'LOW | MEDIUM | HIGH | CRITICAL (empty when the review was skipped).'
+    value: ${{ steps.review.outputs.severity }}
+  skipped:
+    description: 'true when the pull request could not be fetched and no review ran.'
+    value: ${{ steps.review.outputs.skipped }}
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+        cache: pip
+        cache-dependency-path: ${{ github.action_path }}/requirements-action.txt
+
+    - name: Install Sentinel
+      shell: bash
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r "$GITHUB_ACTION_PATH/requirements-action.txt"
+        pip install "$GITHUB_ACTION_PATH"
+
+    # Composite actions do not expose inputs as INPUT_* to `run:` steps the way
+    # Docker and JavaScript actions do, so every input is mapped explicitly
+    # here. The names match what get_settings() already reads.
+    - name: Review the pull request
+      id: review
+      shell: bash
+      working-directory: ${{ runner.temp }}
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        SENTINEL_FAIL_ON: ${{ inputs.fail-on }}
+        LLM_API_KEY: ${{ inputs.llm-api-key }}
+        LLM_BASE_URL: ${{ inputs.llm-base-url }}
+        LLM_MODEL: ${{ inputs.llm-model }}
+        LLM_MAX_CALLS: ${{ inputs.llm-max-calls }}
+        ENABLE_LLM: ${{ inputs.enable-llm }}
+        ENABLE_GITHUB: 'true'
+        ENABLE_CHECKS: ${{ inputs.enable-checks }}
+        ENABLE_DOC_REVIEW: ${{ inputs.enable-doc-review }}
+        ENABLE_TRANSLATION: 'false'
+      # -P keeps the current directory off sys.path, so a consumer repo that
+      # happens to contain its own `sentinel/` cannot shadow this one. The
+      # review reads the diff over the API and never the working tree, so
+      # running from a temp directory costs nothing.
+      run: |
+        python -P -m sentinel.action \
+          ${{ inputs.fail-on-error == 'false' && '--no-fail-on-error' || '' }}
