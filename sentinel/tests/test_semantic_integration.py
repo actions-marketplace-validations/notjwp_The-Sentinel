@@ -68,10 +68,11 @@ def test_semantic_low_preserves_medium_debt():
     assert result["semantic"]["severity"] == SeverityLevel.LOW
 
 
-def test_semantic_low_preserves_high_debt():
+def test_semantic_low_leaves_high_debt_capped_at_medium():
+    """Debt is capped on the way into the overall score; semantic LOW adds nothing."""
     engine = _engine_with_semantic()
     result = engine.assess(code=HIGH_COMPLEXITY_CODE, existing_code_list=NON_DUPLICATE_EXISTING)
-    assert result["severity"] == SeverityLevel.HIGH
+    assert result["severity"] == SeverityLevel.MEDIUM
     assert result["semantic"]["severity"] == SeverityLevel.LOW
 
 

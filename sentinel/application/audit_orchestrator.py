@@ -251,6 +251,37 @@ class AuditOrchestrator:
             return severity.value
         return str(severity).upper() if severity else "LOW"
 
+    @staticmethod
+    def _check_title(
+        risk_value: str,
+        security_count: int,
+        documentation_count: int,
+        semantic_count: int | None,
+        complexity: int | None,
+    ) -> str:
+        """Name what the score is actually about.
+
+        Counting only security and documentation findings made the ordinary
+        case read as a contradiction — "Risk: MEDIUM — 0 security, 0
+        documentation issue(s)" — because the score can also be raised by
+        near-duplicate code or by the shape of the diff, and neither of those
+        is a finding. When both counted categories are empty, say what did
+        raise it instead of printing two zeros beside a non-LOW score.
+        """
+        if security_count or documentation_count:
+            return (
+                f"Risk: {risk_value} — {security_count} security, "
+                f"{documentation_count} documentation issue(s)"
+            )
+        if semantic_count:
+            return (
+                f"Risk: {risk_value} — no security or documentation issues; "
+                f"{semantic_count} near-duplicate(s) of existing code"
+            )
+        if risk_value != SeverityLevel.LOW.value and complexity is not None:
+            return f"Risk: {risk_value} — no issues found; code complexity {complexity}"
+        return f"Risk: {risk_value} — no issues found"
+
     def build_check_payload(
         self,
         findings: list[Finding],
@@ -258,6 +289,7 @@ class AuditOrchestrator:
         *,
         line_map: list | None = None,
         semantic_findings_count: int | None = None,
+        complexity: int | None = None,
         fail_on: SeverityLevel | str | None = None,
     ) -> dict:
         """Shape a review into a Checks API payload: conclusion, title, summary, annotations.
@@ -286,9 +318,12 @@ class AuditOrchestrator:
 
         security = [f for f in findings if getattr(f, "type", None) == "security"]
         documentation = [f for f in findings if getattr(f, "type", None) == "documentation"]
-        title = (
-            f"Risk: {risk_value} — {len(security)} security, "
-            f"{len(documentation)} documentation issue(s)"
+        title = self._check_title(
+            risk_value,
+            len(security),
+            len(documentation),
+            semantic_findings_count,
+            complexity,
         )
         summary_lines = [
             f"**Risk score:** {risk_value}",
@@ -297,6 +332,14 @@ class AuditOrchestrator:
         ]
         if semantic_findings_count is not None:
             summary_lines.append(f"- Semantic duplicates: {semantic_findings_count}")
+        if complexity is not None:
+            summary_lines.append(f"- Code complexity: {complexity}")
+        if risk_value != SeverityLevel.LOW.value and not (
+            security or documentation or semantic_findings_count
+        ):
+            summary_lines.append(
+                "\nNo defect was found; the score reflects the size and branching of the diff."
+            )
         summary = "\n".join(summary_lines)
 
         annotations: list[dict] = []

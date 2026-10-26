@@ -37,9 +37,28 @@ def _code_for_decisions(decision_points: int) -> str:
     return "\n".join(lines)
 
 
-def test_debt_high_forces_overall_high_even_when_pr_is_even():
-    result = RiskEngine().calculate_risk(pr_number=2, code=HIGH_COMPLEXITY_CODE)
-    assert result == SeverityLevel.HIGH
+def test_debt_alone_never_exceeds_medium():
+    """A measurement of the diff must not fail a build on its own.
+
+    Complexity is counted over the whole added-lines blob, so a routine PR
+    clears DebtService's HIGH threshold on size alone. HIGH maps to a `failure`
+    conclusion and a non-zero Action exit, so an uncapped debt score meant
+    "Risk: HIGH" on a review that found nothing. The engine still reports the
+    uncapped debt severity; only its contribution to the overall score is cut.
+    """
+    engine = RiskEngine()
+    result = engine.assess(code=HIGH_COMPLEXITY_CODE)
+
+    assert result["severity"] == SeverityLevel.MEDIUM
+    assert result["security_findings_count"] == 0
+    # The raw measurement is untouched — it is the aggregation that was wrong.
+    assert DebtService().evaluate_debt(HIGH_COMPLEXITY_CODE)["severity"] == SeverityLevel.HIGH
+
+
+def test_a_real_finding_still_reaches_high_over_capped_debt():
+    """The cap must not disarm the engine: security outranks debt, as before."""
+    code = HIGH_COMPLEXITY_CODE + '\napi_key = "abc"\n'
+    assert RiskEngine().calculate_risk(pr_number=2, code=code) == SeverityLevel.HIGH
 
 
 def test_debt_medium_returns_medium_when_other_signal_is_low():
@@ -58,10 +77,11 @@ def test_boundary_complexity_15_propagates_medium():
     assert result == SeverityLevel.MEDIUM
 
 
-def test_boundary_complexity_16_propagates_high():
+def test_boundary_complexity_16_stays_medium_overall():
+    """DebtService calls 16 HIGH; the overall score caps it. Both are intended."""
     code = _code_for_decisions(15)
-    result = RiskEngine().calculate_risk(pr_number=2, code=code)
-    assert result == SeverityLevel.HIGH
+    assert DebtService().evaluate_debt(code)["severity"] == SeverityLevel.HIGH
+    assert RiskEngine().calculate_risk(pr_number=2, code=code) == SeverityLevel.MEDIUM
 
 
 def test_mutation_guard_for_threshold_operator():
@@ -71,12 +91,15 @@ def test_mutation_guard_for_threshold_operator():
 
 
 def test_severity_mapping_exact_for_low_medium_high_paths():
+    """HIGH is reachable only through a finding now, never through debt alone."""
     engine = RiskEngine()
     low = engine.calculate_risk(pr_number=2, code="def simple():\n    return 1")
     medium = engine.calculate_risk(pr_number=2, code=_code_for_decisions(14))
-    high = engine.calculate_risk(pr_number=2, code=_code_for_decisions(15))
+    capped = engine.calculate_risk(pr_number=2, code=_code_for_decisions(15))
+    high = engine.calculate_risk(pr_number=2, code='def f():\n    api_key = "abc"')
     assert low == SeverityLevel.LOW
     assert medium == SeverityLevel.MEDIUM
+    assert capped == SeverityLevel.MEDIUM
     assert high == SeverityLevel.HIGH
 
 

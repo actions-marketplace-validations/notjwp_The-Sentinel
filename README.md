@@ -31,6 +31,9 @@ API (FastAPI) → Application (Orchestration) → Domain (Pure Logic) ← Infras
 
 `RiskEngine` aggregates debt + security + semantic into an overall `SeverityLevel`
 (a CRITICAL security finding forces overall CRITICAL; a semantic duplicate forces HIGH).
+**Technical debt is capped at MEDIUM** on the way into that score — complexity is measured
+over the whole diff, so it tracks size as much as tangle, and a metric should not fail
+your build when the review found nothing. The uncapped figure is still in the report.
 `AuditOrchestrator` layers on LLM enrichment, documentation findings, markdown report
 building, check-run payloads, and optional translation.
 
