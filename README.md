@@ -121,6 +121,86 @@ sentinel/
     └── snapshots/                          # OpenAPI schema snapshots
 ```
 
+## Use it as a GitHub Action
+
+The fastest way to run Sentinel on your own repository: no server, nothing to host, and
+no account with anyone. The review runs on GitHub's runners under your repository's own
+token.
+
+Add `.github/workflows/sentinel.yml`:
+
+```yaml
+name: Sentinel review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read         # read the diff, and blobs for the duplicate-code corpus
+  pull-requests: write   # create or update the review comment
+  checks: write          # create the check run with inline annotations
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: notjwp/The-Sentinel@v1
+        with:
+          llm-api-key: ${{ secrets.NVIDIA_API_KEY }}   # optional
+          fail-on: high
+```
+
+That `permissions:` block is required. Without `pull-requests: write` and `checks: write`
+the API calls return 403, and Sentinel — being failure-safe — will post nothing rather
+than crash.
+
+**The API key is optional.** Without one, every engine still runs and every finding is
+still reported, with static recommendations instead of AI-written explanations and fixes.
+Any OpenAI-compatible provider works; see `.env.example` for presets.
+
+### Inputs
+
+| Input | Default | What it does |
+|---|---|---|
+| `github-token` | `${{ github.token }}` | Reads the PR and posts the review |
+| `fail-on` | `high` | Lowest severity that fails the job: `critical`\|`high`\|`medium`\|`low`\|`never` |
+| `fail-on-error` | `true` | Fail the job when Sentinel cannot run at all |
+| `llm-api-key` | — | Enables AI explanations and fix suggestions |
+| `llm-base-url` | NVIDIA NIM | Any OpenAI-compatible endpoint |
+| `llm-model` | `deepseek-ai/deepseek-v4-flash` | Model at that endpoint |
+| `enable-checks` | `true` | Post the native check run |
+
+Outputs: `severity` and `skipped`, for later steps to branch on.
+
+### Exit codes
+
+| Code | Meaning |
+|---|---|
+| 0 | Reviewed; below the `fail-on` threshold |
+| 1 | Reviewed; at or above `fail-on` |
+| 2 | Could not run — no PR context, no token, or the PR could not be fetched |
+
+Exit 2 is deliberately distinct from a pass. A review that could not read the code must
+never report the same result as one that read it and found nothing.
+
+### Pull requests from forks
+
+GitHub makes `GITHUB_TOKEN` **read-only** for fork pull requests and withholds secrets,
+whatever the `permissions:` block says. Sentinel still reviews the PR in full, but it
+cannot post the comment or the check run.
+
+So the report is **always** written to the workflow run's job summary, which is a plain
+file write and works regardless of token scope. On a fork PR that is where the review
+lives — one click from the PR's checks list — and the job's pass/fail status still
+reflects the verdict.
+
+`pull_request_target` grants a write token and would restore the comment. If you use it,
+**never add `actions/checkout` of the PR's head** — Sentinel reads the diff through the
+API and needs no checkout, and checking out fork code under a privileged token is the
+standard way this goes wrong. Note also that fork PRs get no secrets, so your LLM key is
+absent there and the review falls back to static recommendations.
+
 ## Setup
 
 Python 3.13+ is required.
