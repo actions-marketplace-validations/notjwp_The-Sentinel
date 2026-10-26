@@ -18,6 +18,7 @@ unparseable input rather than guessing.
 """
 
 import ast
+import re
 
 from sentinel.domain.entities.finding import Finding
 from sentinel.domain.services.security_service import SecurityService
@@ -28,6 +29,23 @@ from sentinel.domain.value_objects.severity_level import SeverityLevel
 # both hit while `password_field_label` does not.
 _SECRET_NAME_PARTS = frozenset(
     {"password", "passwd", "pwd", "secret", "token", "apikey", "api_key", "credential"}
+)
+
+# Credentials recognizable by their SHAPE, whatever the variable is called.
+# Necessary because the name heuristic alone cannot cover everything: `aws_key`
+# is a credential but `key` is too generic a word to treat as one (sort_key,
+# cache_key), so without this an AWS literal would slip through — and since a
+# file handled here is withheld from the regex engine entirely, slipping through
+# means detected by nothing at all.
+_CREDENTIAL_SHAPES: tuple[tuple[str, str, str], ...] = (
+    ("aws_access_key", r"AKIA[0-9A-Z]{16}", "AWS access key ID"),
+    ("openai_key", r"sk-[A-Za-z0-9]{20,}", "OpenAI-style API key"),
+    ("github_token", r"gh[pousr]_[A-Za-z0-9]{20,}", "GitHub token"),
+    ("slack_token", r"xox[baprs]-[A-Za-z0-9-]{10,}", "Slack token"),
+    ("private_key_block", r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----", "private key"),
+)
+_CREDENTIAL_PATTERNS = tuple(
+    (rule, re.compile(pattern), label) for rule, pattern, label in _CREDENTIAL_SHAPES
 )
 
 # Words that make a string look like SQL rather than prose.
@@ -72,6 +90,10 @@ class _SecurityVisitor(ast.NodeVisitor):
     def __init__(self, filename: str) -> None:
         self.filename = filename
         self.findings: list[Finding] = []
+        # Lines already reported, so one credential is one finding. Without this
+        # `api_key = "sk-..."` would be caught twice: once by its name and once
+        # by its shape — the very double-reporting this engine exists to avoid.
+        self._reported_lines: set[int] = set()
 
     # --- helpers ---------------------------------------------------------
 
@@ -88,6 +110,9 @@ class _SecurityVisitor(ast.NodeVisitor):
         category, owasp = SecurityService.VULNERABILITY_CLASSIFICATION.get(
             vulnerability_type, ("Unknown", "Unknown")
         )
+        line_no = getattr(node, "lineno", None)
+        if isinstance(line_no, int):
+            self._reported_lines.add(line_no)
         self.findings.append(
             Finding(
                 rule=rule,
@@ -136,6 +161,34 @@ class _SecurityVisitor(ast.NodeVisitor):
                     recommendation="Load it from the environment or a secrets manager.",
                     match=f"{name} = <literal>",
                 )
+        self.generic_visit(node)
+
+    def visit_Constant(self, node: ast.Constant) -> None:
+        """A literal that LOOKS like a credential, wherever it appears.
+
+        Catches what the name heuristic cannot: a key passed straight to a
+        function, stored in a dict, or bound to an innocuously-named variable.
+        Skips lines already reported so a named credential is not counted twice.
+        """
+        if not isinstance(node.value, str) or len(node.value) < 12:
+            self.generic_visit(node)
+            return
+        if getattr(node, "lineno", None) in self._reported_lines:
+            self.generic_visit(node)
+            return
+
+        for rule, pattern, label in _CREDENTIAL_PATTERNS:
+            if pattern.search(node.value):
+                self._add(
+                    node,
+                    rule=rule,
+                    severity=SeverityLevel.HIGH,
+                    vulnerability_type="hardcoded_secret",
+                    description=f"Hardcoded {label} found in source.",
+                    recommendation="Rotate it and load the value from a secure runtime source.",
+                    match=f"<{label}>",
+                )
+                break
         self.generic_visit(node)
 
     # --- SQL built by interpolation --------------------------------------
