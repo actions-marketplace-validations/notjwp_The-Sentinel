@@ -14,7 +14,7 @@ from collections.abc import Mapping
 
 import sentinel.workers.background_worker as bw_module
 from sentinel.action.context import ActionContext, ActionContextError, read_action_context
-from sentinel.application.audit_orchestrator import AuditOrchestrator
+from sentinel.application.audit_orchestrator import NEVER_FAILS, AuditOrchestrator
 from sentinel.application.risk_engine import RiskEngine
 from sentinel.config.settings import Settings, get_settings
 from sentinel.domain.services.document_service import DocumentService
@@ -32,12 +32,6 @@ EXIT_OK = 0
 EXIT_RISK = 1  # the review ran; the PR is at or above the fail-on threshold
 EXIT_ERROR = 2  # the review could not run, or the PR could not be fetched
 
-_SEVERITY_RANK = {
-    SeverityLevel.LOW.value: 0,
-    SeverityLevel.MEDIUM.value: 1,
-    SeverityLevel.HIGH.value: 2,
-    SeverityLevel.CRITICAL.value: 3,
-}
 _NEVER_RANK = 99
 DEFAULT_FAIL_ON = "high"
 
@@ -101,19 +95,26 @@ def _fail_on_rank(value: str | None) -> int:
     normalized = (value or "").strip().lower()
     if normalized in ("never", "none", "off"):
         return _NEVER_RANK
-    rank = _SEVERITY_RANK.get(normalized.upper())
+    rank = SeverityLevel.rank_of(normalized)
     if rank is None:
         logger.warning("Unknown fail-on value %r; falling back to %r", value, DEFAULT_FAIL_ON)
-        return _SEVERITY_RANK[DEFAULT_FAIL_ON.upper()]
+        return SeverityLevel.rank_of(DEFAULT_FAIL_ON)
     return rank
 
 
-def _severity_rank(severity: object) -> int | None:
-    if isinstance(severity, SeverityLevel):
-        return _SEVERITY_RANK.get(severity.value)
-    if isinstance(severity, str):
-        return _SEVERITY_RANK.get(severity.upper())
-    return None
+def _canonical_fail_on(value: str | None) -> str:
+    """The threshold as the check run should see it: a severity name or NEVER.
+
+    Canonicalised here, not there, so the orchestrator never has to know this
+    module's input vocabulary ("off", "none", a typo that falls back to high).
+    """
+    rank = _fail_on_rank(value)
+    if rank == _NEVER_RANK:
+        return NEVER_FAILS
+    for level in SeverityLevel:
+        if level.rank == rank:
+            return level.value
+    return DEFAULT_FAIL_ON.upper()
 
 
 def _severity_text(severity: object) -> str:
@@ -132,7 +133,7 @@ def _exit_code(outcome: ReviewOutcome, fail_on: int, *, fail_on_error: bool) -> 
     if outcome.skipped:
         return EXIT_ERROR if fail_on_error else EXIT_OK
 
-    rank = _severity_rank(outcome.severity)
+    rank = SeverityLevel.rank_of(outcome.severity)
     if rank is not None and rank >= fail_on:
         return EXIT_RISK
     return EXIT_OK
@@ -217,6 +218,10 @@ def main(argv: list[str] | None = None, env: Mapping[str, str] | None = None) ->
     github_client = _build_github_client(context)
     orchestrator = _build_orchestrator(settings)
     job = _build_job(context)
+    # So the check run agrees with the job status. Without it a repo running
+    # `fail-on: never` gets a green job beside a red check, and the reader has
+    # to work out which one to believe.
+    job["check_fail_on"] = _canonical_fail_on(args.fail_on)
 
     outcome = run_review(job, _build_risk_engine(), orchestrator, github_client)
 

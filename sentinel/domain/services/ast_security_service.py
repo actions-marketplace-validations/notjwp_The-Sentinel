@@ -42,7 +42,17 @@ _CREDENTIAL_SHAPES: tuple[tuple[str, str, str], ...] = (
     ("openai_key", r"sk-[A-Za-z0-9]{20,}", "OpenAI-style API key"),
     ("github_token", r"gh[pousr]_[A-Za-z0-9]{20,}", "GitHub token"),
     ("slack_token", r"xox[baprs]-[A-Za-z0-9-]{10,}", "Slack token"),
-    ("private_key_block", r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----", "private key"),
+    # The header alone is not a key. Test fixtures and documentation are full
+    # of bare BEGIN lines with nothing under them, and reporting those trains
+    # people to ignore the rule. A real key carries a base64 body, so that is
+    # what this requires — a placeholder with no key material in it is not a
+    # leaked credential.
+    (
+        "private_key_block",
+        r"-----BEGIN (?:RSA |EC |DSA |OPENSSH |ENCRYPTED )?PRIVATE KEY-----"
+        r"[A-Za-z0-9+/=\s]{40,}",
+        "private key",
+    ),
 )
 _CREDENTIAL_PATTERNS = tuple(
     (rule, re.compile(pattern), label) for rule, pattern, label in _CREDENTIAL_SHAPES

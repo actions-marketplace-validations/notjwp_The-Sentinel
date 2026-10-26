@@ -8,7 +8,11 @@ from sentinel.monitoring.metrics import metrics
 
 
 class LLMService:
-    FALLBACK_FIX = "Use parameterized queries or validate input."
+    # Last-resort strings, used only for a finding that carries nothing better.
+    # They are generic on purpose, which is also why they must not be the first
+    # choice: "use parameterized queries" is actively wrong advice for a
+    # hardcoded credential, and wrong advice reads worse than none.
+    FALLBACK_FIX = "Review this finding and apply the fix appropriate to the rule."
     FALLBACK_EXPLANATION = "Potential security issue detected. Review code manually."
 
     # Upper bound on the matched snippet sent per finding: long enough to identify
@@ -153,6 +157,20 @@ class LLMService:
             result[fid] = {"explanation": explanation, "fix": fix}
         return result
 
+    def _static_enrichment(self, finding) -> dict[str, str]:
+        """What to say about a finding when the model said nothing.
+
+        Prefers what the engine already knows about THIS finding over the
+        generic strings. A hardcoded-credential rule carries "rotate it and
+        load the value from a secure runtime source", which is correct and
+        specific; the generic fix talks about parameterised queries, which for
+        a credential is simply the wrong advice.
+        """
+        return {
+            "explanation": getattr(finding, "description", "") or self.FALLBACK_EXPLANATION,
+            "fix": getattr(finding, "recommendation", None) or self.FALLBACK_FIX,
+        }
+
     def explain_issue_safe(
         self,
         code: str,
@@ -202,7 +220,7 @@ class LLMService:
             self.logger.info("LLM skipped; using fallback response.")
             if enrichable:  # a real fallback; nothing-to-enrich is not one
                 metrics.counter_inc("sentinel_llm_calls_total", {"outcome": "fallback"})
-            return {id(f): {"explanation": self.FALLBACK_EXPLANATION, "fix": self.FALLBACK_FIX} for f in enrichable}
+            return {id(f): self._static_enrichment(f) for f in enrichable}
 
         findings_summary = "\n\n".join(
             self._summarize_finding(i, f) for i, f in enumerate(enrichable, 1)
@@ -216,13 +234,13 @@ class LLMService:
             self.logger.exception("LLM request failed; using fallback response.")
             self.logger.info("Fallback triggered")
             metrics.counter_inc("sentinel_llm_calls_total", {"outcome": "fallback"})
-            return {id(f): {"explanation": self.FALLBACK_EXPLANATION, "fix": self.FALLBACK_FIX} for f in enrichable}
+            return {id(f): self._static_enrichment(f) for f in enrichable}
 
         if not content or not str(content).strip():
             self.logger.warning("LLM returned empty content; using fallback response.")
             self.logger.info("Fallback triggered")
             metrics.counter_inc("sentinel_llm_calls_total", {"outcome": "fallback"})
-            return {id(f): {"explanation": self.FALLBACK_EXPLANATION, "fix": self.FALLBACK_FIX} for f in enrichable}
+            return {id(f): self._static_enrichment(f) for f in enrichable}
 
         self.logger.info("LLM response received")
         metrics.counter_inc("sentinel_llm_calls_total", {"outcome": "success"})

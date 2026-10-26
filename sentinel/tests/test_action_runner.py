@@ -325,3 +325,37 @@ def test_the_job_carries_the_head_sha_from_the_event():
 
 def test_the_job_omits_an_absent_head_sha():
     assert "head_sha" not in runner._build_job(_context(head_sha=None))
+
+
+# --- the check run must agree with the job -----------------------------------
+
+
+def test_the_threshold_reaches_the_check_run(monkeypatch, workdir):
+    """fail-on: never means a green job, so the check must not be red."""
+    fake = _FakeGitHub()
+    monkeypatch.setattr(runner, "_build_github_client", lambda context: fake)
+
+    exit_code = runner.main(["--fail-on", "never"], _env(workdir))
+
+    assert exit_code == runner.EXIT_OK
+    assert fake.check_runs[0]["conclusion"] == "neutral"
+
+
+def test_a_met_threshold_still_fails_the_check(monkeypatch, workdir):
+    fake = _FakeGitHub()
+    monkeypatch.setattr(runner, "_build_github_client", lambda context: fake)
+
+    exit_code = runner.main(["--fail-on", "high"], _env(workdir))
+
+    assert exit_code == runner.EXIT_RISK
+    assert fake.check_runs[0]["conclusion"] == "failure"
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [("never", "NEVER"), ("off", "NEVER"), ("high", "HIGH"),
+     ("CRITICAL", "CRITICAL"), ("banana", "HIGH")],
+)
+def test_the_threshold_is_canonicalised_before_it_leaves_the_action(value, expected):
+    """So the orchestrator never has to know this module's input vocabulary."""
+    assert runner._canonical_fail_on(value) == expected

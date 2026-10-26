@@ -31,6 +31,9 @@ API (FastAPI) → Application (Orchestration) → Domain (Pure Logic) ← Infras
 
 `RiskEngine` aggregates debt + security + semantic into an overall `SeverityLevel`
 (a CRITICAL security finding forces overall CRITICAL; a semantic duplicate forces HIGH).
+**Technical debt is capped at MEDIUM** on the way into that score — complexity is measured
+over the whole diff, so it tracks size as much as tangle, and a metric should not fail
+your build when the review found nothing. The uncapped figure is still in the report.
 `AuditOrchestrator` layers on LLM enrichment, documentation findings, markdown report
 building, check-run payloads, and optional translation.
 
@@ -242,9 +245,16 @@ editing `LLM_BASE_URL` / `LLM_MODEL` / `LLM_API_KEY` — no code change. See
 
 ### GitHub App setup
 
+> Running it as an always-on service, or making the App public so others can install it?
+> See **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)** — free always-on hosting, TLS, the
+> two firewalls Oracle gives you, and the per-installation LLM budget.
+
 Create a GitHub App (Settings → Developer settings → GitHub Apps) with **Repository
 permissions**: Pull requests (Read & write), Issues (Read & write), Checks (Read & write),
 Contents (Read-only); webhook can stay disabled for manual triggering.
+
+One deployment serves **every** installation: the installation id travels with each
+delivery, so `GITHUB_INSTALLATION_ID` is only a fallback for manual triggers.
 
 > **Changing permissions on an already-installed App needs re-approval.** GitHub raises a
 > pending request on the installation; until you accept it the token keeps its old scopes.

@@ -1,0 +1,43 @@
+# Production overlay: TLS in front, no app port on the public interface.
+#
+#   docker compose -f docker-compose.yml -f deploy/docker-compose.prod.yml up -d
+#
+# What it changes versus the base file:
+#   - the app no longer publishes 8000 to the host; only Caddy is exposed
+#   - Caddy terminates TLS and proxies to the app over the compose network
+#   - memory limits, because the Always Free shapes are small and an OOM kill
+#     of Redis loses the queue
+services:
+  sentinel:
+    # Overrides the base port mapping: reachable only from the compose
+    # network, so nothing can bypass TLS by hitting the host IP directly.
+    ports: !override []
+    environment:
+      ENVIRONMENT: production
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+
+  redis:
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data # certificates; losing this re-issues them and can hit rate limits
+      - caddy-config:/config
+    depends_on:
+      - sentinel
+    restart: unless-stopped
+
+volumes:
+  caddy-data:
+  caddy-config:

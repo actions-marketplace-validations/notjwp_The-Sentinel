@@ -40,19 +40,30 @@ class RiskEngine:
             return SeverityLevel.MEDIUM
         return self._normalize_severity(security_result.get("severity", SeverityLevel.LOW))
 
-    @staticmethod
+    # Debt is capped before it reaches the overall score. Complexity is counted
+    # over the whole added-lines blob, so ~20 added lines of ordinary code
+    # already passes DebtService's HIGH threshold; letting that alone return
+    # HIGH turns the check run red and makes the Action exit non-zero on a
+    # review that found nothing, which is the one failure mode guaranteed to
+    # get the tool uninstalled. A measurement of the diff may inform a reviewer;
+    # it must not block a merge on its own. The uncapped number is unchanged in
+    # `complexity`/`maintainability` and still printed in the report.
+    DEBT_SEVERITY_CAP = SeverityLevel.MEDIUM
+
+    @classmethod
     def _overall_severity(
+        cls,
         debt_severity: SeverityLevel,
         security_severity: SeverityLevel,
         semantic_severity: SeverityLevel,
     ) -> SeverityLevel:
+        if debt_severity == SeverityLevel.HIGH:
+            debt_severity = cls.DEBT_SEVERITY_CAP
         if security_severity == SeverityLevel.CRITICAL:
             return SeverityLevel.CRITICAL
         if semantic_severity == SeverityLevel.HIGH:
             return SeverityLevel.HIGH
         if security_severity == SeverityLevel.HIGH:
-            return SeverityLevel.HIGH
-        if debt_severity == SeverityLevel.HIGH:
             return SeverityLevel.HIGH
         if security_severity == SeverityLevel.MEDIUM or debt_severity == SeverityLevel.MEDIUM:
             return SeverityLevel.MEDIUM

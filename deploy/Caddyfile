@@ -1,0 +1,36 @@
+# TLS in front of Sentinel.
+#
+# GitHub verifies the webhook endpoint's certificate, so a self-signed cert or
+# plain HTTP means deliveries fail before they reach the app. Caddy obtains and
+# renews a Let's Encrypt certificate automatically; the only requirement is that
+# this hostname resolves to the machine and that ports 80 and 443 are reachable
+# from the internet (see DEPLOYMENT.md — on Oracle that is TWO firewalls).
+#
+# Replace the hostname and email, then:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+
+sentinel.example.com {
+	encode gzip
+
+	# /metrics is gated by METRICS_TOKEN in the app, but it has no business
+	# being on the public internet at all: the series disclose review volume,
+	# severity mix and queue depth. Blocked here as well, so a missing token
+	# in the environment cannot expose it.
+	@metrics path /metrics*
+	respond @metrics 404
+
+	reverse_proxy sentinel:8000 {
+		# The worker runs in-process and a review can take a while; the
+		# webhook itself answers immediately, so this only affects the
+		# health and root endpoints in practice.
+		transport http {
+			response_header_timeout 30s
+		}
+	}
+}
+
+# Caddy needs an email for the ACME account. Set it here or pass
+# CADDY_ACME_EMAIL and use {$CADDY_ACME_EMAIL}.
+{
+	email you@example.com
+}

@@ -135,6 +135,7 @@ def test_no_circular_imports_in_sentinel_modules():
         "sentinel.infrastructure.semantic.embedding_engine",
         "sentinel.infrastructure.redis.redis_job_queue",
         "sentinel.infrastructure.redis.redis_delivery_dedup",
+        "sentinel.infrastructure.redis.redis_llm_quota",
         "sentinel.api.webhook_controller",
         "sentinel.api.health_controller",
         "sentinel.workers.job_queue",

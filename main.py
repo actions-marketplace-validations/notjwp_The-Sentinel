@@ -35,15 +35,22 @@ background_worker = BackgroundWorker(job_queue)
 
 
 def verify_startup_config(settings) -> None:
-    """Refuse to boot on a configuration that would expose an unsigned webhook.
+    """Refuse to boot on a configuration that cannot do its job safely.
 
-    Fail-closed only under ENVIRONMENT=production: an unsigned public /webhook is
-    the one misconfiguration that must never start quietly. Anywhere else keeps
-    the historical warn-and-continue, so local dev and the test suite (which set
-    no secret) are unaffected. Pure and importable so it is testable without
-    booting the app.
+    Fail-closed only under ENVIRONMENT=production. Anywhere else keeps the
+    historical warn-and-continue, so local dev and the test suite (which set
+    neither a secret nor credentials) are unaffected. Pure and importable so it
+    is testable without booting the app.
     """
-    if not settings.ENABLE_GITHUB or settings.GITHUB_WEBHOOK_SECRET:
+    if not settings.ENABLE_GITHUB:
+        return
+    _verify_webhook_secret(settings)
+    _verify_github_credentials(settings)
+
+
+def _verify_webhook_secret(settings) -> None:
+    """An unsigned public /webhook is the one thing that must never start quietly."""
+    if settings.GITHUB_WEBHOOK_SECRET:
         return
     if settings.ENVIRONMENT == "production":
         raise RuntimeError(
@@ -53,6 +60,37 @@ def verify_startup_config(settings) -> None:
     logger.warning(
         "ENABLE_GITHUB is on but GITHUB_WEBHOOK_SECRET is unset — "
         "webhook signature verification is DISABLED. Set it before public exposure."
+    )
+
+
+def _verify_github_credentials(settings) -> None:
+    """Without these the service boots happily and silently posts nothing.
+
+    Every GitHub call is failure-safe by design, so a missing app id or private
+    key produces no crash and no failed health check — just reviews that are
+    computed, logged, and never delivered. That is worse than not starting:
+    the dashboard is green while the product does nothing.
+
+    GITHUB_INSTALLATION_ID is deliberately NOT required. Since multi-tenancy it
+    is only the fallback for jobs that carry no installation of their own.
+    """
+    missing = [
+        name
+        for name in ("GITHUB_APP_ID", "GITHUB_PRIVATE_KEY")
+        if not getattr(settings, name, None)
+    ]
+    if not missing:
+        return
+
+    detail = " and ".join(missing)
+    if settings.ENVIRONMENT == "production":
+        raise RuntimeError(
+            f"ENVIRONMENT=production with ENABLE_GITHUB but no {detail} — refusing to "
+            "start: reviews would run and silently never be posted."
+        )
+    logger.warning(
+        "ENABLE_GITHUB is on but %s is unset — reviews will run but cannot be posted.",
+        detail,
     )
 
 

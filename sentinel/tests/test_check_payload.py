@@ -119,3 +119,53 @@ def test_title_and_summary_counts():
     assert payload["title"] == "Risk: HIGH — 2 security, 1 documentation issue(s)"
     assert "**Risk score:** HIGH" in payload["summary"]
     assert "Semantic duplicates: 3" in payload["summary"]
+
+
+# --- The title must not contradict the score ---------------------------------
+#
+# "Risk: MEDIUM — 0 security, 0 documentation issue(s)" is what the tool used
+# to post on an ordinary pull request. A reader resolves that contradiction by
+# distrusting the check, so the title now names whatever raised the score.
+
+
+def test_an_elevated_score_with_no_findings_names_the_complexity_that_raised_it():
+    payload = _orchestrator().build_check_payload(
+        [], SeverityLevel.MEDIUM, complexity=47, semantic_findings_count=0
+    )
+    assert payload["title"] == "Risk: MEDIUM — no issues found; code complexity 47"
+    assert "- Code complexity: 47" in payload["summary"]
+    assert "No defect was found" in payload["summary"]
+
+
+def test_a_clean_review_says_so_instead_of_printing_two_zeros():
+    payload = _orchestrator().build_check_payload([], SeverityLevel.LOW, complexity=3)
+    assert payload["title"] == "Risk: LOW — no issues found"
+    # LOW needs no excuse: the complexity is in the summary, not the title.
+    assert "complexity" not in payload["title"]
+    assert "No defect was found" not in payload["summary"]
+
+
+def test_near_duplicates_are_named_when_they_are_what_raised_the_score():
+    payload = _orchestrator().build_check_payload(
+        [], SeverityLevel.HIGH, semantic_findings_count=2, complexity=99
+    )
+    assert payload["title"] == (
+        "Risk: HIGH — no security or documentation issues; "
+        "2 near-duplicate(s) of existing code"
+    )
+    # Semantic duplicates ARE a finding, so the diff-shape caveat is wrong here.
+    assert "No defect was found" not in payload["summary"]
+
+
+def test_counts_still_lead_the_title_whenever_there_is_something_to_count():
+    """The explanatory forms are for the empty case only; they must not displace counts."""
+    payload = _orchestrator().build_check_payload(
+        [_security(1)], SeverityLevel.HIGH, line_map=[["a.py", 1]], complexity=99
+    )
+    assert payload["title"] == "Risk: HIGH — 1 security, 0 documentation issue(s)"
+
+
+def test_complexity_is_optional_and_its_absence_is_not_a_crash():
+    payload = _orchestrator().build_check_payload([], SeverityLevel.MEDIUM)
+    assert payload["title"] == "Risk: MEDIUM — no issues found"
+    assert "Code complexity" not in payload["summary"]

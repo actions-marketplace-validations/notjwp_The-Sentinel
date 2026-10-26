@@ -202,3 +202,26 @@ def test_every_regex_secret_rule_is_still_covered_by_the_ast_engine():
         assert not caught_by_regex or caught_by_ast, (
             f"regex catches {regex_rule!r} in {source!r} but the AST engine reports nothing"
         )
+
+
+# --- A header is not a key ----------------------------------------------------
+
+
+def test_a_bare_pem_header_is_not_a_credential():
+    """Fixtures and docs are full of these; flagging them trains people to ignore the rule.
+
+    This is not hypothetical — it is what the tool reported about its own test
+    suite the first time it reviewed a pull request.
+    """
+    # Exactly the fixture shape that was reported: a header, an escaped
+    # newline, one filler character. No key material anywhere in it.
+    assert rules(r'GITHUB_PRIVATE_KEY = "-----BEGIN PRIVATE KEY-----\nx\n"' + "\n") == set()
+    assert rules('KEY = "-----BEGIN PRIVATE KEY-----"\n') == set()
+    assert rules('doc = "paste your -----BEGIN RSA PRIVATE KEY----- here"\n') == set()
+
+
+def test_a_pem_with_key_material_is_still_a_credential():
+    """The other half of the guard: narrowing the rule must not disarm it."""
+    body = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7VJTUt9Us8cKj" * 2
+    source = f'KEY = """-----BEGIN PRIVATE KEY-----\n{body}\n-----END PRIVATE KEY-----"""\n'
+    assert "private_key_block" in rules(source)

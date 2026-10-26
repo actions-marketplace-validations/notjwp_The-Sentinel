@@ -75,8 +75,8 @@ def test_fallback_values_are_used_on_provider_failure():
     
     result = service.generate_pr_audit("code", findings)
     
-    assert result[id(findings[0])]["fix"] == "Use parameterized queries or validate input."
-    assert result[id(findings[0])]["explanation"] == "Potential security issue detected. Review code manually."
+    assert result[id(findings[0])]["fix"] == LLMService.FALLBACK_FIX
+    assert result[id(findings[0])]["explanation"] == "issue"  # the finding's own description, not the generic string
 
 
 def test_llm_disabled_mode_skips_processing(monkeypatch):

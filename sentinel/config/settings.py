@@ -42,6 +42,10 @@ class Settings:
     NVIDIA_API_KEY: str | None
     ENABLE_LLM: bool
     LLM_MAX_CALLS: int
+    # Reviews per installation per day that may use the LLM. 0 = unlimited.
+    # Caps what one API key costs when the App is public; past the cap reviews
+    # still run, with static recommendations.
+    LLM_DAILY_QUOTA: int
     LLM_TIMEOUT: float
     LLM_BASE_URL: str
     LLM_MODEL: str
@@ -132,6 +136,7 @@ def get_settings() -> Settings:
         NVIDIA_API_KEY=nvidia_key,
         ENABLE_LLM=_to_bool(os.getenv("ENABLE_LLM"), True),
         LLM_MAX_CALLS=_to_int(os.getenv("LLM_MAX_CALLS"), 1),
+        LLM_DAILY_QUOTA=_to_int(os.getenv("LLM_DAILY_QUOTA"), 0),
         LLM_TIMEOUT=_to_float(os.getenv("LLM_TIMEOUT"), 5.0),
         LLM_BASE_URL=llm_base_url,
         LLM_MODEL=llm_model,
