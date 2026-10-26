@@ -54,7 +54,16 @@ class GitHubClient:
     CORPUS_MAX_FILES = 20  # most .py blobs fetched per corpus build
     # Full-source fetches for AST analysis cost one API call per file, so the
     # budget is capped; files beyond it fall back to regex over their diff.
-    MAX_SOURCE_FETCHES = 20
+    #
+    # The cap is a precision budget as much as a cost one, which is why it is
+    # not tight. A .py file that misses out is analyzed by the regex engine,
+    # and regex cannot tell a credential from a string that looks like one —
+    # at 20, a 26-file PR had its last six files scanned that way and the tool
+    # reported two of its own test fixtures as hardcoded API keys. Files arrive
+    # in GitHub's order (path-sorted), so the ones that lose are consistently
+    # whatever sorts last, which in this repo is the test suite. 50 covers any
+    # review-sized PR; against the Action's 1,000 req/hr token it is cheap.
+    MAX_SOURCE_FETCHES = 50
     CORPUS_MAX_FILE_BYTES = 50_000  # skip larger blobs (tree items carry size)
     MAX_CONTENT_BYTES = 200_000  # hard cap on any decoded file content
 

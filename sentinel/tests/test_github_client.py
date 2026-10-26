@@ -1127,3 +1127,46 @@ def test_the_app_path_is_unchanged_when_no_access_token_is_set(monkeypatch):
 
     _patch_imports(monkeypatch, response_payload=b'{"token": "minted", "expires_at": ""}')
     assert client._get_installation_token() == "minted"
+
+
+def test_full_source_fetches_are_capped_and_the_rest_fall_back_to_patch(monkeypatch):
+    """The cap bounds API cost, and the overflow is a precision cliff, not a gap.
+
+    A .py file past the budget still gets analyzed — by the regex engine, over
+    its diff — so nothing is skipped. But regex cannot distinguish a credential
+    from a string that looks like one, which is the whole reason the AST engine
+    exists. This pins the mechanism so the trade-off stays visible; the cap's
+    value is tuned separately.
+    """
+    client = GitHubClient(app_id="123", installation_id="999", private_key="private")
+    over = client.MAX_SOURCE_FETCHES + 3
+    items = [
+        {"filename": f"m{i:03d}.py", "patch": "+x = 1", "contents_url": f"https://api.test/c/{i}"}
+        for i in range(over)
+    ]
+    monkeypatch.setattr(client, "get_pull_request_files", lambda *a, **k: items)
+
+    fetched: list[str] = []
+
+    def fake_content(url):
+        fetched.append(url)
+        return "FULL SOURCE"
+
+    monkeypatch.setattr(client, "get_content_by_url", fake_content)
+    data = client.get_pull_request_data("octo", "repo", 7)
+
+    assert len(fetched) == client.MAX_SOURCE_FETCHES
+    # Everything still has content; only its fidelity differs.
+    assert len(data["file_contents"]) == over
+    assert data["file_contents"]["m000.py"] == "FULL SOURCE"
+    assert data["file_contents"][f"m{over - 1:03d}.py"] == "+x = 1"
+
+
+def test_the_fetch_budget_covers_a_review_sized_pull_request():
+    """Pinned because 20 was not enough, and the symptom was a false positive.
+
+    A PR touching 26 Python files overflowed the old budget and the tool
+    reported test fixtures as hardcoded credentials. A regression here is
+    silent — the review still posts, it is just wrong — so assert the floor.
+    """
+    assert GitHubClient.MAX_SOURCE_FETCHES >= 40
