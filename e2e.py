@@ -112,11 +112,23 @@ def say(step, msg):
 
 
 def run(cmd, cwd=None, check=True):
-    result = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+    """Run a command and return its stdout.
+
+    Decoding is pinned to UTF-8 with replacement rather than left to the
+    platform default: on Windows that default is cp1252, and docker's build
+    output contains bytes it cannot decode. The failure is nasty — the reader
+    thread dies inside subprocess, stdout comes back as None, and the caller
+    trips over .strip() with a traceback that points nowhere near the cause.
+    """
+    result = subprocess.run(
+        cmd, cwd=cwd, capture_output=True,
+        encoding="utf-8", errors="replace",
+    )
+    stdout = result.stdout or ""
     if check and result.returncode != 0:
-        print(result.stdout + result.stderr, file=sys.stderr)
+        print(stdout + (result.stderr or ""), file=sys.stderr)
         raise SystemExit(f"command failed: {' '.join(cmd)}")
-    return result.stdout.strip()
+    return stdout.strip()
 
 
 def wait_for(predicate, timeout, interval=2.0):
