@@ -130,3 +130,33 @@ def test_settings_module_import_handles_missing_dotenv(monkeypatch):
 
     monkeypatch.setattr(builtins, "__import__", real_import)
     importlib.reload(settings_module)
+
+
+def test_credentials_do_not_appear_in_the_settings_repr(monkeypatch):
+    """A dataclass repr reaches pytest output, log lines and tracebacks.
+
+    This is not hypothetical: a failing assertion in this very module printed a
+    live NVIDIA key into the test output. Rendering Settings anywhere must not
+    disclose a credential, while the attributes stay readable to the code that
+    needs them.
+    """
+    secrets = {
+        "NVIDIA_API_KEY": "nvapi-SENTINEL-TEST-SECRET",
+        "LLM_API_KEY": "llm-SENTINEL-TEST-SECRET",
+        "GITHUB_PRIVATE_KEY": "-----BEGIN PRIVATE KEY-----SENTINEL-TEST-SECRET",
+        "GITHUB_WEBHOOK_SECRET": "whsec-SENTINEL-TEST-SECRET",
+        "METRICS_TOKEN": "metrics-SENTINEL-TEST-SECRET",
+    }
+    for name, value in secrets.items():
+        monkeypatch.setenv(name, value)
+
+    settings = settings_module.get_settings()
+    rendered = repr(settings)
+
+    for name, value in secrets.items():
+        assert value not in rendered, f"{name} leaked into repr()"
+        assert getattr(settings, name) == value, f"{name} is no longer readable"
+
+    # Non-secret configuration must still be visible, or the repr is useless.
+    assert "ENVIRONMENT=" in rendered
+    assert "LLM_MODEL=" in rendered
