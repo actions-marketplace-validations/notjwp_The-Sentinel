@@ -41,6 +41,22 @@ DECISIONS.md
 ARCHITECTURE.pdf
 FLOW.pdf
 DECISIONS.pdf
+# Academic write-ups: a narrative overview and the PO/CO/SDG mapping. Same
+# reasoning as the block above — they describe the project for a submission
+# rather than documenting it for someone working on it, and they go stale
+# against the code with no test to catch it.
+PROJECT_OVERVIEW.md
+Sentinel_PO_CO_SDG_Mapping.docx
+
+# Agent/editor local state. settings.local.json is per-machine by definition;
+# it was only being ignored by a GLOBAL ignore file on this machine, so a
+# clone elsewhere would have offered to commit it.
+.claude/settings.local.json
+
+# Patch, merge and backup leftovers
+*.bak
+*.orig
+*.rej
 
 # Logs
 *.log
