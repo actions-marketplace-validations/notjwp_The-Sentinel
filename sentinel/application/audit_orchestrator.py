@@ -83,11 +83,15 @@ class AuditOrchestrator:
         await self.queue.enqueue(job)
         logger.info("Queued PR audit job for repo=%s pr_number=%s", repo, pr_number)
 
-    def enrich_findings_with_llm(self, code: str, findings: list[Finding]) -> list[Finding]:
+    def enrich_findings_with_llm(
+        self, code: str, findings: list[Finding], *, allow_llm: bool = True
+    ) -> list[Finding]:
         settings = get_settings()
         if not findings:
             return []
-        if not settings.ENABLE_LLM or self.llm_service is None:
+        # allow_llm is the per-review budget decision (see RedisLLMQuota); the
+        # settings flag is the deployment-wide one. Either can veto.
+        if not allow_llm or not settings.ENABLE_LLM or self.llm_service is None:
             return findings
 
         self.llm_service.reset_budget()
@@ -410,8 +414,9 @@ class AuditOrchestrator:
         complexity: int | None = None,
         maintainability: float | None = None,
         semantic_findings_count: int | None = None,
+        allow_llm: bool = True,
     ) -> tuple[list[Finding], str]:
-        security_findings = self.enrich_findings_with_llm(code, findings)
+        security_findings = self.enrich_findings_with_llm(code, findings, allow_llm=allow_llm)
         document_findings = self.collect_document_findings(files, file_contents=file_contents, code=code)
         all_findings = [*security_findings, *document_findings]
 

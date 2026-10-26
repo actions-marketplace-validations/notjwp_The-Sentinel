@@ -14,6 +14,7 @@ from sentinel.domain.services.semantic_service import SemanticService
 from sentinel.domain.value_objects.severity_level import SeverityLevel
 from sentinel.infrastructure.github.github_client import GitHubClient
 from sentinel.infrastructure.llm.llm_service import LLMService
+from sentinel.infrastructure.redis.redis_llm_quota import RedisLLMQuota
 from sentinel.infrastructure.semantic.embedding_engine import EmbeddingEngine
 from sentinel.monitoring.logger import get_logger
 from sentinel.monitoring.metrics import metrics
@@ -92,6 +93,20 @@ class ReviewOutcome:
         return self.severity is None
 
 
+def _build_llm_quota(settings: Settings) -> "RedisLLMQuota | None":
+    """The per-installation LLM budget, or None when nothing is metered.
+
+    Needs Redis: the count has to be shared across restarts and replicas, and
+    an in-memory counter would reset the budget every deploy. With no quota
+    configured, or no Redis, enrichment is simply never withheld.
+
+    Module-scope seam, like the other builders, so tests can inject a fake.
+    """
+    if settings.LLM_DAILY_QUOTA <= 0 or not settings.REDIS_URL:
+        return None
+    return RedisLLMQuota(settings.REDIS_URL, daily_quota=settings.LLM_DAILY_QUOTA)
+
+
 def _safe_assessment() -> dict:
     """Assessment-shaped defaults, used when risk analysis fails outright."""
     return {
@@ -125,6 +140,21 @@ class BackgroundWorker:
         # One GitHub client per installation, reused across jobs. Keyed by
         # installation id; "" is the configured-fallback client.
         self._clients: dict[str, GitHubClient] = {}
+
+    @staticmethod
+    async def _apply_llm_quota(job: dict, llm_quota: "RedisLLMQuota | None") -> None:
+        """Decide whether this review may spend an LLM call, before it starts.
+
+        Checked here rather than inside the pipeline because the counter is
+        async and the pipeline runs in a worker thread. Nothing is written to
+        the job when nothing is metered, so the default stays "allowed".
+        """
+        if llm_quota is None:
+            return
+        allowed = await llm_quota.consume(job.get("installation_id"))
+        job["llm_allowed"] = allowed
+        if not allowed:
+            metrics.counter_inc("sentinel_llm_quota_exhausted_total")
 
     def _client_for(self, settings: Settings, installation_id: object) -> GitHubClient | None:
         """Resolve the GitHub client for one installation, reused across jobs.
@@ -455,6 +485,10 @@ class BackgroundWorker:
                 complexity=assessment.get("complexity"),
                 maintainability=assessment.get("maintainability"),
                 semantic_findings_count=assessment.get("semantic_findings_count"),
+                # Set by the worker when this installation has spent its daily
+                # LLM budget. Absent everywhere else, including the Action,
+                # where the key belongs to the person running it.
+                allow_llm=job.get("llm_allowed", True),
             )
             posted = github_client.upsert_comment(owner, repo_name, pr_number, report)
             metrics.counter_inc(
@@ -560,6 +594,7 @@ class BackgroundWorker:
 
         settings = get_settings()
         llm_service = _build_llm_service(settings)
+        llm_quota = _build_llm_quota(settings)
         orchestrator = AuditOrchestrator(
             self.queue,
             llm_service=llm_service,
@@ -580,6 +615,7 @@ class BackgroundWorker:
                 # needs its own credentials, and the wrong token fetches
                 # nothing and posts nothing.
                 github_client = self._client_for(settings, job.get("installation_id"))
+                await self._apply_llm_quota(job, llm_quota)
                 # Shielded so a shutdown mid-job lets that job finish and ack
                 # instead of being abandoned unacked. The shield alone would
                 # return control immediately and orphan the inner task, so the
