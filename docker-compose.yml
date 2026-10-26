@@ -11,7 +11,12 @@ services:
       # Durable queue/dedup (overrides .env). Remove to fall back to in-memory.
       REDIS_URL: redis://redis:6379/0
     depends_on:
-      - redis
+      redis:
+        # Wait for Redis to answer, not merely to exist. On a host reboot both
+        # start together, and a worker that calls recover_pending() against a
+        # Redis still loading its AOF logs a failure and starts with the queue
+        # it can see — which is none of it.
+        condition: service_healthy
     restart: unless-stopped
 
   redis:
@@ -20,6 +25,12 @@ services:
     command: ["redis-server", "--appendonly", "yes"]
     volumes:
       - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
     restart: unless-stopped
 
 volumes:
