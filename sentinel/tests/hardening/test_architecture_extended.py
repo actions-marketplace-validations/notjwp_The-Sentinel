@@ -219,6 +219,11 @@ def test_infrastructure_imports_only_allowed():
         "urllib",
         "jwt",
         "openai",
+        # Corpus blobs are fetched concurrently: 20 independent round trips
+        # were 7.8s of a 45s review, against ~0.0s for every analysis engine
+        # combined. Threads only overlap I/O here — no shared mutable state
+        # crosses the pool, and results are reassembled by index.
+        "concurrent",
     ]
 
     for path in _python_files(INFRASTRUCTURE_DIR):

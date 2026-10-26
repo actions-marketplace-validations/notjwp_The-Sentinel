@@ -63,16 +63,34 @@ outputs:
 runs:
   using: composite
   steps:
-    # No `cache: pip` here, deliberately. Pointing it at the action's own
+    # Not setup-python's `cache: pip`. Pointing that at the action's own
     # requirements needs ${{ github.action_path }}, which is a bare "." when
     # the action is used locally (`uses: ./`), and setup-python rejects a
     # pattern containing "." outright. Omitting the path instead makes it hunt
     # for requirements files in the CONSUMER's repository and fail when there
-    # are none. Installing from wheels takes a few seconds; neither failure
-    # mode is worth saving them.
+    # are none.
     - uses: actions/setup-python@v5
       with:
         python-version: ${{ inputs.python-version }}
+
+    # Caching the wheel download directory instead sidesteps both problems:
+    # the path is the runner's, not the action's or the consumer's. Measured
+    # on a real review, installing scikit-learn and openai from PyPI was 8.4s
+    # of a 45s run, against ~0.0s for every analysis engine combined.
+    #
+    # The key cannot use hashFiles on requirements-action.txt: for a consumer
+    # writing `uses: notjwp/The-Sentinel@v1` the action is checked out under
+    # _actions/, outside GITHUB_WORKSPACE, and hashFiles refuses to look
+    # there. github.action_ref is the release the consumer pinned, so it
+    # changes exactly when the dependencies might have — and a miss costs a
+    # download, never a wrong answer.
+    - name: Cache Sentinel's Python wheels
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/pip
+        key: sentinel-pip-${{ runner.os }}-py${{ inputs.python-version }}-${{ github.action_ref || 'local' }}
+        restore-keys: |
+          sentinel-pip-${{ runner.os }}-py${{ inputs.python-version }}-
 
     - name: Install Sentinel
       shell: bash

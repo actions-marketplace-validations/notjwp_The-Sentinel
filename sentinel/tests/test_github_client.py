@@ -1170,3 +1170,59 @@ def test_the_fetch_budget_covers_a_review_sized_pull_request():
     silent — the review still posts, it is just wrong — so assert the floor.
     """
     assert GitHubClient.MAX_SOURCE_FETCHES >= 40
+
+
+# --- Corpus blobs are fetched concurrently, but order is part of the contract ---
+
+
+def test_corpus_blobs_are_returned_in_ranked_order_not_completion_order(monkeypatch):
+    """Concurrency must not reorder the corpus.
+
+    get_repo_code_corpus ranks candidates by relevance to the PR before
+    truncating, and detect_duplicates walks the corpus in sequence. If a slow
+    blob landed last instead of in its ranked position, the corpus would still
+    look plausible and the ranking would silently stop meaning anything - the
+    kind of regression no assertion on length or content would catch.
+    """
+    import time
+
+    client = GitHubClient(app_id="1", installation_id="9", private_key="k")
+    monkeypatch.setattr(client, "_get_installation_token", lambda: "tok")
+
+    # The first blob is the slowest, so completion order is the reverse of
+    # request order. Anything that returns results as they arrive fails here.
+    delays = {"sha0": 0.06, "sha1": 0.03, "sha2": 0.0}
+
+    def fake_http_json(method, url, headers=None, **kw):
+        sha = url.rsplit("/", 1)[-1]
+        time.sleep(delays.get(sha, 0.0))
+        return {"content": __import__("base64").b64encode(sha.encode()).decode(),
+                "encoding": "base64"}
+
+    monkeypatch.setattr(client, "_http_json", fake_http_json)
+
+    out = client._fetch_blobs("https://api.test", "o", "r", ["sha0", "sha1", "sha2"], "tok")
+    assert out == ["sha0", "sha1", "sha2"]
+
+
+def test_a_failing_corpus_blob_is_dropped_without_sinking_the_rest(monkeypatch):
+    """Partial corpus beats none — the sequential version behaved this way too."""
+    client = GitHubClient(app_id="1", installation_id="9", private_key="k")
+    monkeypatch.setattr(client, "_get_installation_token", lambda: "tok")
+
+    def fake_http_json(method, url, headers=None, **kw):
+        sha = url.rsplit("/", 1)[-1]
+        if sha == "bad":
+            raise RuntimeError("blob fetch exploded")
+        return {"content": __import__("base64").b64encode(sha.encode()).decode(),
+                "encoding": "base64"}
+
+    monkeypatch.setattr(client, "_http_json", fake_http_json)
+
+    out = client._fetch_blobs("https://api.test", "o", "r", ["ok1", "bad", "ok2"], "tok")
+    assert out == ["ok1", "ok2"]
+
+
+def test_fetching_no_blobs_does_not_start_a_pool(monkeypatch):
+    client = GitHubClient(app_id="1", installation_id="9", private_key="k")
+    assert client._fetch_blobs("https://api.test", "o", "r", [], "tok") == []
