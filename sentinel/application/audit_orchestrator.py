@@ -8,6 +8,11 @@ from sentinel.monitoring.logger import get_logger
 
 logger = get_logger(__name__)
 
+# The threshold value meaning "no severity should fail the build". Lives here
+# because the check-run conclusion is what honours it; the Action canonicalises
+# its own input down to this or a severity name.
+NEVER_FAILS = "NEVER"
+
 
 class JobQueuePort(Protocol):
     """What the orchestrator needs from a queue: enqueue only.
@@ -191,7 +196,15 @@ class AuditOrchestrator:
                 lines.append("- No AI explanation available.")
 
             lines.extend(["", "## Fix Suggestion"])
-            fixes = [finding.fix_suggestion for finding in security_findings if finding.fix_suggestion]
+            # The engine's own recommendation stands in when the model was
+            # never consulted (no key, enrichment disabled, budget spent). It
+            # is rule-specific and correct, where "no fix suggestion
+            # available" is just an empty section.
+            fixes = [
+                finding.fix_suggestion or finding.recommendation
+                for finding in security_findings
+                if finding.fix_suggestion or finding.recommendation
+            ]
             if fixes:
                 for fix in fixes:
                     lines.extend(["```python", fix, "```"])
@@ -245,6 +258,7 @@ class AuditOrchestrator:
         *,
         line_map: list | None = None,
         semantic_findings_count: int | None = None,
+        fail_on: SeverityLevel | str | None = None,
     ) -> dict:
         """Shape a review into a Checks API payload: conclusion, title, summary, annotations.
 
@@ -256,6 +270,19 @@ class AuditOrchestrator:
         """
         risk_value = self._severity_value(risk)
         conclusion = self._CHECK_CONCLUSIONS.get(risk_value, "success")
+
+        # When the caller has declared what severity should fail the build, a
+        # finding below it must not post a red check: a failing check beside a
+        # passing job is a contradiction the reader has to resolve, and they
+        # resolve it by distrusting the check. Only ever downgrades.
+        if conclusion == "failure":
+            if isinstance(fail_on, str) and fail_on.strip().upper() == NEVER_FAILS:
+                conclusion = "neutral"
+            else:
+                threshold = SeverityLevel.rank_of(fail_on)
+                reached = SeverityLevel.rank_of(risk_value)
+                if threshold is not None and reached is not None and reached < threshold:
+                    conclusion = "neutral"
 
         security = [f for f in findings if getattr(f, "type", None) == "security"]
         documentation = [f for f in findings if getattr(f, "type", None) == "documentation"]

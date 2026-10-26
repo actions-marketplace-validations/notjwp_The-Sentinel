@@ -520,6 +520,9 @@ class BackgroundWorker:
                     assessment["severity"],
                     line_map=job.get("line_map"),
                     semantic_findings_count=assessment.get("semantic_findings_count"),
+                    # Set by the Action from its fail-on input; absent on the
+                    # hosted path, which has no build to fail.
+                    fail_on=job.get("check_fail_on"),
                 )
                 check_posted = github_client.create_check_run(
                     owner,

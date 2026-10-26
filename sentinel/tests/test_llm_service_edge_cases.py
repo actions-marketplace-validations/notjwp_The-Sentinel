@@ -37,8 +37,8 @@ def test_llm_disabled_returns_fallback_and_no_calls():
     f = _finding()
     result = service.generate_pr_audit("code", [f])
 
-    assert result[id(f)]["fix"] == "Use parameterized queries or validate input."
-    assert result[id(f)]["explanation"] == "Potential security issue detected. Review code manually."
+    assert result[id(f)]["fix"] == LLMService.FALLBACK_FIX
+    assert result[id(f)]["explanation"] == "d"  # the finding's own description, not the generic string
     assert service.call_count == 0
     assert provider.calls == 0
 
@@ -70,13 +70,13 @@ def test_provider_failure_and_empty_results_use_fallbacks():
     
     failing = LLMService(provider=_FailingProvider(), enable_llm=True, max_calls=5)
     result_fail = failing.generate_pr_audit("code", [f])
-    assert result_fail[id(f)]["fix"] == "Use parameterized queries or validate input."
-    assert result_fail[id(f)]["explanation"] == "Potential security issue detected. Review code manually."
+    assert result_fail[id(f)]["fix"] == LLMService.FALLBACK_FIX
+    assert result_fail[id(f)]["explanation"] == "d"  # the finding's own description, not the generic string
 
     empty = LLMService(provider=_EmptyProvider(), enable_llm=True, max_calls=5)
     result_empty = empty.generate_pr_audit("code", [f])
-    assert result_empty[id(f)]["fix"] == "Use parameterized queries or validate input."
-    assert result_empty[id(f)]["explanation"] == "Potential security issue detected. Review code manually."
+    assert result_empty[id(f)]["fix"] == LLMService.FALLBACK_FIX
+    assert result_empty[id(f)]["explanation"] == "d"  # the finding's own description, not the generic string
 
 
 def test_call_limit_enforced_across_multiple_calls():
@@ -93,7 +93,7 @@ def test_call_limit_enforced_across_multiple_calls():
 
     assert first[id(f1)]["fix"] == "fixed_code"
     assert second[id(f2)]["explanation"] == "explanation"
-    assert third[id(f3)]["fix"] == "Use parameterized queries or validate input."
+    assert third[id(f3)]["fix"] == LLMService.FALLBACK_FIX
     assert service.call_count == 2
     assert service.calls_made == 2
 
@@ -104,7 +104,7 @@ def test_reset_budget_allows_subsequent_calls():
 
     f = _finding()
     assert service.generate_pr_audit("code", [f])[id(f)]["fix"] == "fixed_code"
-    assert service.generate_pr_audit("code", [f])[id(f)]["fix"] == "Use parameterized queries or validate input."
+    assert service.generate_pr_audit("code", [f])[id(f)]["fix"] == LLMService.FALLBACK_FIX
 
     service.reset_budget()
 
