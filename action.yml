@@ -30,7 +30,7 @@ inputs:
   llm-model:
     description: 'Model name at that endpoint.'
     required: false
-    default: 'deepseek-ai/deepseek-v4-flash'
+    default: 'nvidia/nemotron-3.5-lightning-30b-a3b'
   llm-max-calls:
     description: 'Budget of LLM calls per review.'
     required: false

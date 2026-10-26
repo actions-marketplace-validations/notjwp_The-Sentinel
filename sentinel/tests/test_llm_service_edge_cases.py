@@ -138,7 +138,7 @@ def test_llm_service_uses_provider_defaults_when_base_url_model_omitted():
     # Omitting them preserves NIMProvider's NVIDIA class defaults (back-compat).
     service = LLMService(enable_llm=True, api_key="k")
     assert service.provider.base_url == "https://integrate.api.nvidia.com/v1"
-    assert service.provider.model == "deepseek-ai/deepseek-v4-flash"
+    assert service.provider.model == "nvidia/nemotron-3.5-lightning-30b-a3b"
 
 
 class _MarkdownProvider:

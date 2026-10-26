@@ -1,5 +1,5 @@
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 try:
     from dotenv import load_dotenv  # type: ignore[import-not-found]
@@ -39,7 +39,7 @@ def _to_float(value: str | None, default: float) -> float:
 @dataclass(frozen=True)
 class Settings:
     ENVIRONMENT: str
-    NVIDIA_API_KEY: str | None
+    NVIDIA_API_KEY: str | None = field(repr=False)
     ENABLE_LLM: bool
     LLM_MAX_CALLS: int
     # Reviews per installation per day that may use the LLM. 0 = unlimited.
@@ -49,17 +49,17 @@ class Settings:
     LLM_TIMEOUT: float
     LLM_BASE_URL: str
     LLM_MODEL: str
-    LLM_API_KEY: str | None
+    LLM_API_KEY: str | None = field(repr=False)
     ENABLE_GITHUB: bool
     ENABLE_CHECKS: bool
     ENABLE_TRANSLATION: bool
     ENABLE_DOC_REVIEW: bool
     GITHUB_APP_ID: str | None
     GITHUB_INSTALLATION_ID: str | None
-    GITHUB_PRIVATE_KEY: str | None
+    GITHUB_PRIVATE_KEY: str | None = field(repr=False)
     GITHUB_API_BASE_URL: str
-    GITHUB_WEBHOOK_SECRET: str | None
-    METRICS_TOKEN: str | None
+    GITHUB_WEBHOOK_SECRET: str | None = field(repr=False)
+    METRICS_TOKEN: str | None = field(repr=False)
     REDIS_URL: str | None
 
 
@@ -87,7 +87,7 @@ def get_settings() -> Settings:
     raw_llm_model = os.getenv("LLM_MODEL")
     llm_model = raw_llm_model.strip() if raw_llm_model is not None else ""
     if llm_model == "":
-        llm_model = "deepseek-ai/deepseek-v4-flash"
+        llm_model = "nvidia/nemotron-3.5-lightning-30b-a3b"
 
     raw_llm_key = os.getenv("LLM_API_KEY")
     llm_api_key = raw_llm_key.strip() if raw_llm_key is not None else None
@@ -137,7 +137,7 @@ def get_settings() -> Settings:
         ENABLE_LLM=_to_bool(os.getenv("ENABLE_LLM"), True),
         LLM_MAX_CALLS=_to_int(os.getenv("LLM_MAX_CALLS"), 1),
         LLM_DAILY_QUOTA=_to_int(os.getenv("LLM_DAILY_QUOTA"), 0),
-        LLM_TIMEOUT=_to_float(os.getenv("LLM_TIMEOUT"), 5.0),
+        LLM_TIMEOUT=_to_float(os.getenv("LLM_TIMEOUT"), 45.0),
         LLM_BASE_URL=llm_base_url,
         LLM_MODEL=llm_model,
         LLM_API_KEY=llm_api_key,

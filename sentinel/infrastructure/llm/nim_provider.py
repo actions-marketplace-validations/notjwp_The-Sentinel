@@ -13,14 +13,30 @@ from sentinel.monitoring.logger import get_logger
 
 class NIMProvider(LLMProvider):
     BASE_URL = "https://integrate.api.nvidia.com/v1"
-    MODEL = "deepseek-ai/deepseek-v4-flash"
+    MODEL = "nvidia/nemotron-3.5-lightning-30b-a3b"
     RETRY_DELAYS = (0.3, 0.8)
+
+    # The default model reasons before it answers, and the reasoning is billed
+    # against the same completion budget as the answer. At 700 the budget was
+    # spent entirely on reasoning: the response came back with content=None and
+    # every review silently fell through to static text. A real two-finding
+    # audit needs ~1300 completion tokens, so this leaves headroom rather than
+    # sitting just above the observed figure.
+    MAX_TOKENS = 2048
+
+    # Measured: a two-finding audit against the default model takes ~18s wall
+    # clock, because reasoning tokens are generated before the first word of
+    # the answer. The old 5.0 was tuned for a non-reasoning model and would
+    # have cut every call off mid-thought. Enrichment runs off the request
+    # path (a worker thread, or the Action's own job), so waiting is cheap;
+    # silently degrading to static text is not.
+    DEFAULT_TIMEOUT = 45.0
 
     def __init__(
         self,
         *,
         api_key: str | None = None,
-        timeout: float = 5.0,
+        timeout: float = DEFAULT_TIMEOUT,
         base_url: str = BASE_URL,
         model: str = MODEL,
         client: Any = None,
@@ -88,6 +104,24 @@ class NIMProvider(LLMProvider):
         return NIMProvider._sanitize(content)
 
     @staticmethod
+    def _finish_reason(response: Any) -> str:
+        """Why generation stopped, for the empty-content log line.
+
+        `length` here means the model never reached its answer — on a reasoning
+        model the whole budget went on thinking. That is a configuration
+        problem with a one-line fix, and it is indistinguishable from a genuine
+        refusal unless the reason is logged, so it is.
+        """
+        choices = getattr(response, "choices", None)
+        if not choices:
+            return "unknown"
+        first = choices[0]
+        reason = getattr(first, "finish_reason", None)
+        if reason is None and isinstance(first, dict):
+            reason = first.get("finish_reason")
+        return str(reason) if reason else "unknown"
+
+    @staticmethod
     def _is_rate_limit_error(exc: Exception) -> bool:
         status_code = getattr(exc, "status_code", None)
         if status_code == 429:
@@ -113,7 +147,7 @@ class NIMProvider(LLMProvider):
                         {"role": "user", "content": user_prompt},
                     ],
                     temperature=0.0,
-                    max_tokens=700,
+                    max_tokens=self.MAX_TOKENS,
                     stream=False,
                 )
             except Exception as exc:
@@ -126,7 +160,12 @@ class NIMProvider(LLMProvider):
             content = self._extract_content(response)
             if content:
                 return content
-            self.logger.warning("NIM response missing content.")
+            self.logger.warning(
+                "NIM response missing content (finish_reason=%s, max_tokens=%s). "
+                "A reasoning model that stops on 'length' spent the budget thinking.",
+                self._finish_reason(response),
+                self.MAX_TOKENS,
+            )
             return None
 
         return None

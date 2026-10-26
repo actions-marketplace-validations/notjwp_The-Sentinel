@@ -171,7 +171,7 @@ Any OpenAI-compatible provider works; see `.env.example` for presets.
 | `fail-on-error` | `true` | Fail the job when Sentinel cannot run at all |
 | `llm-api-key` | — | Enables AI explanations and fix suggestions |
 | `llm-base-url` | NVIDIA NIM | Any OpenAI-compatible endpoint |
-| `llm-model` | `deepseek-ai/deepseek-v4-flash` | Model at that endpoint |
+| `llm-model` | `nvidia/nemotron-3.5-lightning-30b-a3b` | Model at that endpoint |
 | `enable-checks` | `true` | Post the native check run |
 
 Outputs: `severity` and `skipped`, for later steps to branch on.
@@ -228,9 +228,9 @@ credentials even when the flag is on.
 | `ENABLE_DOC_REVIEW` | `true` | Enable documentation findings |
 | `ENABLE_TRANSLATION` | `false` | Append translated report sections (needs LLM **and** budget: set `LLM_MAX_CALLS≥3` — 1 enrichment + 1 per language) |
 | `LLM_MAX_CALLS` | `1` | Per-request LLM call budget (shared by enrichment + translation) |
-| `LLM_TIMEOUT` | `5.0` | LLM request timeout (seconds) |
+| `LLM_TIMEOUT` | `45.0` | LLM request timeout (seconds) |
 | `LLM_BASE_URL` | `https://integrate.api.nvidia.com/v1` | LLM endpoint (any OpenAI-compatible provider) |
-| `LLM_MODEL` | `deepseek-ai/deepseek-v4-flash` | Model id at that endpoint |
+| `LLM_MODEL` | `nvidia/nemotron-3.5-lightning-30b-a3b` | Model id at that endpoint |
 | `LLM_API_KEY` | — | LLM credential; **falls back to `NVIDIA_API_KEY`** when unset |
 | `NVIDIA_API_KEY` | — | Back-compat credential / fallback for `LLM_API_KEY` |
 | `GITHUB_APP_ID` / `GITHUB_INSTALLATION_ID` / `GITHUB_PRIVATE_KEY` | — | GitHub App auth (RS256) |
