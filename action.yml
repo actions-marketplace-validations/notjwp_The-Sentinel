@@ -63,11 +63,16 @@ outputs:
 runs:
   using: composite
   steps:
+    # No `cache: pip` here, deliberately. Pointing it at the action's own
+    # requirements needs ${{ github.action_path }}, which is a bare "." when
+    # the action is used locally (`uses: ./`), and setup-python rejects a
+    # pattern containing "." outright. Omitting the path instead makes it hunt
+    # for requirements files in the CONSUMER's repository and fail when there
+    # are none. Installing from wheels takes a few seconds; neither failure
+    # mode is worth saving them.
     - uses: actions/setup-python@v5
       with:
         python-version: ${{ inputs.python-version }}
-        cache: pip
-        cache-dependency-path: ${{ github.action_path }}/requirements-action.txt
 
     - name: Install Sentinel
       shell: bash

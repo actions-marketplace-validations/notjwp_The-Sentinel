@@ -9,10 +9,24 @@ red. That is a worse outcome than refusing to start.
 
 import pytest
 
-from main import verify_startup_config
 from sentinel.config.settings import get_settings
 
 _CREDENTIALS = ("GITHUB_APP_ID", "GITHUB_PRIVATE_KEY")
+
+
+def _verify():
+    """Import main lazily, the way the other tests that touch it do.
+
+    main.py sits beside the package rather than inside it, and the editable
+    install maps only `sentinel`, so the repo root is on sys.path only when
+    something put it there. `python -m pytest` does (it prepends the working
+    directory); the bare `pytest` that CI runs does not. At module scope that
+    is a collection error; inside a test body it resolves. This is a
+    load-bearing convention, not a stylistic one.
+    """
+    from main import verify_startup_config
+
+    return verify_startup_config
 
 
 @pytest.fixture
@@ -39,7 +53,7 @@ def test_production_boots_with_a_secret_and_credentials(clean_credentials):
     _with_credentials(clean_credentials)
     clean_credentials.setenv("ENVIRONMENT", "production")
 
-    verify_startup_config(get_settings())  # must not raise
+    _verify()(get_settings())  # must not raise
 
 
 def test_production_refuses_to_start_without_an_app_id(clean_credentials):
@@ -47,7 +61,7 @@ def test_production_refuses_to_start_without_an_app_id(clean_credentials):
     clean_credentials.setenv("GITHUB_PRIVATE_KEY", "-----BEGIN PRIVATE KEY-----\nx\n")
 
     with pytest.raises(RuntimeError, match="GITHUB_APP_ID"):
-        verify_startup_config(get_settings())
+        _verify()(get_settings())
 
 
 def test_production_refuses_to_start_without_a_private_key(clean_credentials):
@@ -55,14 +69,14 @@ def test_production_refuses_to_start_without_a_private_key(clean_credentials):
     clean_credentials.setenv("GITHUB_APP_ID", "12345")
 
     with pytest.raises(RuntimeError, match="GITHUB_PRIVATE_KEY"):
-        verify_startup_config(get_settings())
+        _verify()(get_settings())
 
 
 def test_the_error_names_everything_that_is_missing(clean_credentials):
     clean_credentials.setenv("ENVIRONMENT", "production")
 
     with pytest.raises(RuntimeError) as excinfo:
-        verify_startup_config(get_settings())
+        _verify()(get_settings())
 
     message = str(excinfo.value)
     assert "GITHUB_APP_ID" in message and "GITHUB_PRIVATE_KEY" in message
@@ -74,7 +88,7 @@ def test_the_installation_id_is_not_required(clean_credentials):
     clean_credentials.setenv("ENVIRONMENT", "production")
     clean_credentials.delenv("GITHUB_INSTALLATION_ID", raising=False)
 
-    verify_startup_config(get_settings())  # must not raise
+    _verify()(get_settings())  # must not raise
 
 
 def test_development_warns_and_continues(clean_credentials, caplog):
@@ -82,7 +96,7 @@ def test_development_warns_and_continues(clean_credentials, caplog):
     clean_credentials.setenv("ENVIRONMENT", "development")
 
     with caplog.at_level("WARNING"):
-        verify_startup_config(get_settings())
+        _verify()(get_settings())
 
     assert "cannot be posted" in caplog.text
 
@@ -92,7 +106,7 @@ def test_github_disabled_skips_every_check(clean_credentials):
     clean_credentials.setenv("ENVIRONMENT", "production")
     clean_credentials.delenv("GITHUB_WEBHOOK_SECRET", raising=False)
 
-    verify_startup_config(get_settings())  # must not raise
+    _verify()(get_settings())  # must not raise
 
 
 def test_the_webhook_secret_gate_still_fires_first(clean_credentials):
@@ -102,4 +116,4 @@ def test_the_webhook_secret_gate_still_fires_first(clean_credentials):
     clean_credentials.delenv("GITHUB_WEBHOOK_SECRET", raising=False)
 
     with pytest.raises(RuntimeError, match="GITHUB_WEBHOOK_SECRET"):
-        verify_startup_config(get_settings())
+        _verify()(get_settings())
