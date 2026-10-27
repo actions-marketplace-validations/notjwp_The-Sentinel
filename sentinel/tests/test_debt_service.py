@@ -163,3 +163,45 @@ def test_fuzz_synthetic_strings_deterministic_no_crash():
         code = "\n".join(lines)
         result = service.evaluate_debt(code)
         _assert_valid_result(result)
+
+
+# --- the AST override ---------------------------------------------------------
+
+
+def test_a_supplied_complexity_replaces_the_keyword_count():
+    """The caller that parsed the real files knows better than the regex.
+
+    `code` here would count 21 decisions; the supplied 2 is what a per-function
+    analyzer saw. The supplied value must drive BOTH the severity band and the
+    maintainability figure, or the report contradicts itself.
+    """
+    service = DebtService()
+    code = "\n\n".join(
+        f"def f{i}(x):\n    if x:\n        return 1\n    return 0" for i in range(20)
+    )
+
+    counted = service.evaluate_debt(code)
+    supplied = service.evaluate_debt(code, complexity=2)
+
+    assert counted["complexity"] == 21
+    assert counted["severity"] == SeverityLevel.HIGH
+    assert supplied["complexity"] == 2
+    assert supplied["severity"] == SeverityLevel.LOW
+    assert supplied["maintainability"] > counted["maintainability"]
+
+
+def test_the_override_is_keyword_only_and_optional():
+    """Positional would silently swallow a second argument meant for something else."""
+    service = DebtService()
+    code = "def f(x):\n    if x:\n        return 1\n"
+
+    assert service.evaluate_debt(code) == service.evaluate_debt(code, complexity=None)
+    with pytest.raises(TypeError):
+        service.evaluate_debt(code, 2)
+
+
+def test_an_overridden_result_keeps_the_contract_shape():
+    result = DebtService().evaluate_debt("def f():\n    return 1\n", complexity=9)
+    assert set(result.keys()) == {"severity", "complexity", "maintainability"}
+    assert type(result["complexity"]) is int
+    assert result["severity"] == SeverityLevel.MEDIUM

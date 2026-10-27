@@ -102,6 +102,26 @@ def test_debt_service_1000_evaluations_under_threshold():
     assert elapsed < 2.0
 
 
+def test_ast_debt_service_1000_evaluations_under_threshold():
+    """Parsing costs more than a regex sweep, so it gets its own budget.
+
+    The AST engine runs once per changed .py file, not once per review, so this
+    is the loop that matters. Kept separate from the regex guard above so a
+    regression points at the engine that caused it.
+    """
+    from sentinel.domain.services.ast_debt_service import ASTDebtService
+
+    svc = ASTDebtService()
+    code = "def f(x):\n" + "    if x > 0:\n        x += 1\n" * 10 + "    return x"
+
+    start = time.monotonic()
+    for _ in range(1000):
+        svc.analyze_source(code, "f.py")
+    elapsed = time.monotonic() - start
+
+    assert elapsed < 5.0
+
+
 # --- Security Service Performance ---
 
 

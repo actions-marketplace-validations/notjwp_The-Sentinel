@@ -92,6 +92,7 @@ class RiskEngine:
         resilient: bool,
         warn_threshold_seconds: float | None = None,
         extra_security_findings: list | None = None,
+        extra_debt_complexity: int | None = None,
     ) -> dict:
         """The single assessment implementation behind assess/assess_resilient.
 
@@ -101,8 +102,22 @@ class RiskEngine:
         """
         start_time = time.monotonic()
 
+        # extra_debt_complexity is the AST engine's per-function score, supplied
+        # by the caller that fetched the real files — the same arrangement as
+        # extra_security_findings below, and for the same reason: only the
+        # caller knows which files had full source that parsed.
+        #
+        # Passed only when there is one. `debt_service` is an injection point, so
+        # sending an unconditional keyword would break every implementation
+        # written against the old one-argument signature for no gain — there is
+        # nothing to say when no file parsed.
+        def evaluate_debt() -> dict:
+            if extra_debt_complexity is None:
+                return self.debt_service.evaluate_debt(code)
+            return self.debt_service.evaluate_debt(code, complexity=extra_debt_complexity)
+
         debt_result = self._run(
-            "Debt", lambda: self.debt_service.evaluate_debt(code),
+            "Debt", evaluate_debt,
             lambda: dict(self._DEBT_DEFAULT), resilient=resilient,
         )
         security_result = self._run(
@@ -163,12 +178,14 @@ class RiskEngine:
         *,
         warn_threshold_seconds: float = 0.1,
         extra_security_findings: list | None = None,
+        extra_debt_complexity: int | None = None,
     ) -> dict:
         """Engine failures degrade to safe defaults. Use for background work."""
         return self._assess(
             code, existing_code_list,
             resilient=True, warn_threshold_seconds=warn_threshold_seconds,
             extra_security_findings=extra_security_findings,
+            extra_debt_complexity=extra_debt_complexity,
         )
 
     def assess(self, code: str = "", existing_code_list: list[str] | None = None) -> dict:

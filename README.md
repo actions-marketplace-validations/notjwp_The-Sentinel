@@ -33,7 +33,7 @@ API (FastAPI) → Application (Orchestration) → Domain (Pure Logic) ← Infras
 
 | Engine | Layer | Purpose |
 |---|---|---|
-| **Technical Debt** | domain | Cyclomatic complexity, line count, nesting depth analysis |
+| **Technical Debt** | domain | **Per-function cyclomatic complexity** from the AST — the worst function the PR actually edited, not the sum of every branch in the diff. Falls back to a keyword count for fragments that do not parse |
 | **Security** | domain | Regex-based vulnerability detection + OWASP classification: SQL injection, hardcoded secrets (OpenAI/AWS keys, api_key/password assignments), command injection, `eval`/`exec`, `os.system`, `subprocess shell=True` |
 | **Semantic** | domain + infra | Duplicate code detection via embedding cosine similarity, compared against a **real corpus fetched from the PR's base branch** (chunked per top-level function/class) |
 | **Documentation** | domain | Docs/docstring/comment checks; `.md`/`.txt` files are judged on their **full text** fetched from the PR head (patch text is only the fallback) |
