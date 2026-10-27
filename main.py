@@ -11,6 +11,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from sentinel.api.body_limit import BodySizeLimitMiddleware
 from sentinel.api.health_controller import router as health_router
 from sentinel.api.metrics_controller import router as metrics_router
 from sentinel.api.webhook_controller import get_orchestrator
@@ -134,6 +135,10 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="The Sentinel", lifespan=lifespan)
+
+# Outermost: the body cap has to run before FastAPI reads the request, which
+# it does before any route dependency. Unauthenticated callers reach this.
+app.add_middleware(BodySizeLimitMiddleware)
 
 app.dependency_overrides[get_orchestrator] = lambda: audit_orchestrator
 app.state.job_queue = job_queue  # /metrics reads live queue depth from here

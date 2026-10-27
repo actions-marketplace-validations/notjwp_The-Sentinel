@@ -143,3 +143,4 @@ def test_production_with_github_disabled_starts_without_a_secret():
         ENVIRONMENT="production", ENABLE_GITHUB="false", GITHUB_WEBHOOK_SECRET=None
     )
     verify_startup_config(settings)  # must not raise
+
