@@ -12,6 +12,7 @@ from sentinel.application.audit_orchestrator import AuditOrchestrator
 from sentinel.application.risk_engine import RiskEngine
 from sentinel.config.settings import Settings, get_settings
 from sentinel.domain.entities.pull_request import PullRequest
+from sentinel.domain.services.ast_debt_service import ASTDebtService
 from sentinel.domain.services.ast_security_service import ASTSecurityService
 from sentinel.domain.services.document_service import DocumentService
 from sentinel.domain.services.semantic_service import SemanticService
@@ -198,7 +199,10 @@ class BackgroundWorker:
 
     @staticmethod
     def _assess(
-        job: dict, risk_engine: RiskEngine, extra_security_findings: list | None = None
+        job: dict,
+        risk_engine: RiskEngine,
+        extra_security_findings: list | None = None,
+        extra_debt_complexity: int | None = None,
     ) -> tuple[PullRequest, dict]:
         """Read/coerce/truncate the job's code and run the resilient assessment.
 
@@ -246,6 +250,7 @@ class BackgroundWorker:
                 existing_code_list=existing_code_list,
                 warn_threshold_seconds=TARGET_LATENCY_SECONDS,
                 extra_security_findings=extra_security_findings,
+                extra_debt_complexity=extra_debt_complexity,
             )
         except Exception:
             logger.exception(
@@ -267,6 +272,24 @@ class BackgroundWorker:
         return pull_request, assessment
 
     @staticmethod
+    def _added_lines_by_file(line_map: object) -> dict[str, set[int]]:
+        """The PR's added lines, grouped by path, from a job's line_map.
+
+        Shared by both AST passes: each needs to know which lines the author
+        actually wrote, and a line_map survives a Redis round-trip as lists
+        rather than tuples, so the shape is re-validated rather than trusted.
+        """
+        added_by_file: dict[str, set[int]] = {}
+        if not isinstance(line_map, list):
+            return added_by_file
+        for entry in line_map:
+            if isinstance(entry, (list, tuple)) and len(entry) == 2:
+                path, line_no = entry
+                if isinstance(path, str) and isinstance(line_no, int):
+                    added_by_file.setdefault(path, set()).add(line_no)
+        return added_by_file
+
+    @staticmethod
     def _ast_security_findings(job: dict) -> list:
         """AST findings for every changed .py file whose full source parses.
 
@@ -283,12 +306,7 @@ class BackgroundWorker:
         if not isinstance(file_contents, dict) or not isinstance(line_map, list):
             return []
 
-        added_by_file: dict[str, set[int]] = {}
-        for entry in line_map:
-            if isinstance(entry, (list, tuple)) and len(entry) == 2:
-                path, line_no = entry
-                if isinstance(path, str) and isinstance(line_no, int):
-                    added_by_file.setdefault(path, set()).add(line_no)
+        added_by_file = BackgroundWorker._added_lines_by_file(line_map)
 
         analyzer = ASTSecurityService()
         findings: list = []
@@ -311,6 +329,49 @@ class BackgroundWorker:
                 "AST security analysis covered %s file(s): %s", len(covered), ", ".join(covered)
             )
         return findings
+
+    @staticmethod
+    def _ast_complexity(job: dict) -> int | None:
+        """Worst per-function complexity across the changed .py files that parse.
+
+        The sibling of ``_ast_security_findings``, over the same full sources
+        and for the same reason: the regex engine sums every branch in the diff,
+        so its number grows with the size of the pull request rather than the
+        tangle of anything in it.
+
+        Returns None when nothing parsed, which is not the same as "nothing is
+        complex" — it means fall back to the keyword count over the blob.
+
+        Restricted to functions this PR actually edited, exactly as the security
+        pass restricts its findings. Without that, touching one line of a file
+        would report whatever the worst function in it happens to be — accurate,
+        somebody else's doing, and the same false positive this engine replaced,
+        only quieter. With no ``line_map`` to narrow by, the whole file is scored.
+        """
+        file_contents = job.get("file_contents")
+        if not isinstance(file_contents, dict):
+            return None
+
+        line_map = job.get("line_map")
+        # None, not {}: "no diff information" means score whole files, while an
+        # empty map would mean "this PR added nothing", which is a different claim.
+        added_by_file = (
+            BackgroundWorker._added_lines_by_file(line_map)
+            if isinstance(line_map, list)
+            else None
+        )
+
+        analyzer = ASTDebtService()
+        worst: int | None = None
+        for path, source in file_contents.items():
+            if not isinstance(path, str) or not path.lower().endswith(".py"):
+                continue
+            touched = None if added_by_file is None else added_by_file.get(path, set())
+            score = analyzer.analyze_source(source, path, touched)
+            if score is None:
+                continue  # unparseable — the regex engine still sees it
+            worst = score if worst is None else max(worst, score)
+        return worst
 
     @staticmethod
     def _strip_ast_covered_lines(job: dict) -> None:
@@ -706,9 +767,15 @@ def run_review(
     # those lines are then withheld from the text-matching engine so a single
     # line is never reported by both.
     ast_findings = BackgroundWorker._ast_security_findings(job)
+    # Read before the strip: _strip_ast_covered_lines empties the blob of
+    # exactly the files the AST engines could read, and the complexity pass
+    # works from file_contents, which it does not touch.
+    ast_complexity = BackgroundWorker._ast_complexity(job)
     BackgroundWorker._strip_ast_covered_lines(job)
 
-    pull_request, assessment = BackgroundWorker._assess(job, risk_engine, ast_findings)
+    pull_request, assessment = BackgroundWorker._assess(
+        job, risk_engine, ast_findings, ast_complexity
+    )
     risk = assessment["severity"]
     report_line = BackgroundWorker._format_risk_line(pull_request.pr_number, risk)
     metrics.counter_inc(

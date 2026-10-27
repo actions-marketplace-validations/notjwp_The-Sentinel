@@ -619,3 +619,109 @@ def test_strip_is_a_no_op_when_blob_and_map_disagree():
     BackgroundWorker._strip_ast_covered_lines(job)
     assert job["code"] == "a\nb\nc"
     assert job["line_map"] == [("x.py", 1)]
+
+
+# --- Per-function complexity from the real files (not the diff blob) ---
+
+
+_TIDY_MODULE = (
+    "def a(x):\n"
+    "    if x:\n"
+    "        return 1\n"
+    "    return 0\n"
+    "\n"
+    "def b(x):\n"
+    "    if x:\n"
+    "        return 2\n"
+    "    return 0\n"
+)
+
+_TANGLED_MODULE = "def gnarly(v):\n" + "".join(
+    f"    if v > {i}:\n        v += 1\n" for i in range(12)
+) + "    return v\n"
+
+
+def test_complexity_is_the_worst_function_not_the_sum_of_the_files():
+    """Two files of tidy code must not add up to a complex review.
+
+    This is the defect in the regex engine, seen from the worker: it reads the
+    assembled added-lines blob, so every branch in the pull request is summed.
+    """
+    job = {"file_contents": {"a.py": _TIDY_MODULE, "b.py": _TIDY_MODULE}}
+    assert BackgroundWorker._ast_complexity(job) == 2
+
+
+def test_the_worst_file_sets_the_score():
+    job = {"file_contents": {"tidy.py": _TIDY_MODULE, "gnarly.py": _TANGLED_MODULE}}
+    assert BackgroundWorker._ast_complexity(job) == 13
+
+
+def test_unparseable_and_non_python_files_are_skipped():
+    """A fragment that cannot parse leaves the regex engine in charge."""
+    job = {
+        "file_contents": {
+            "frag.py": "    x = 1",          # an indented fragment, not a module
+            "README.md": "# if for while",   # not Python at all
+        }
+    }
+    assert BackgroundWorker._ast_complexity(job) is None
+
+
+def test_no_file_contents_means_no_opinion_rather_than_zero():
+    """None is the signal to fall back; a number would silently override the regex."""
+    assert BackgroundWorker._ast_complexity({}) is None
+    assert BackgroundWorker._ast_complexity({"file_contents": None}) is None
+    assert BackgroundWorker._ast_complexity({"file_contents": {}}) is None
+
+
+def test_a_parseable_file_with_no_branches_scores_one_not_none():
+    job = {"file_contents": {"flat.py": "x = 1\ny = 2\n"}}
+    assert BackgroundWorker._ast_complexity(job) == 1
+
+
+def test_the_assessment_reports_the_ast_complexity_over_the_blob_count():
+    """End to end through _assess: the number in the report is the honest one."""
+    from sentinel.application.risk_engine import RiskEngine
+
+    blob = "\n".join(f"    if x > {i}:" for i in range(30))  # 30 decisions in the blob
+    job = {
+        "repo": "o/r",
+        "pr_number": 1,
+        "code": blob,
+        "file_contents": {"a.py": _TIDY_MODULE},
+    }
+
+    _, counted = BackgroundWorker._assess(job, RiskEngine())
+    _, supplied = BackgroundWorker._assess(
+        job, RiskEngine(), None, BackgroundWorker._ast_complexity(job)
+    )
+
+    assert counted["complexity"] == 31
+    assert supplied["complexity"] == 2
+
+
+def test_complexity_ignores_functions_the_pr_did_not_touch():
+    """line_map narrows the score to the author's own work.
+
+    Mirrors test_ast_ignores_problems_the_pr_did_not_touch above: the analyzer
+    sees the whole module, the review is only about this PR.
+    """
+    module = (
+        "def inherited(v):\n"
+        + "".join(f"    if v > {i}:\n        v += 1\n" for i in range(9))
+        + "    return v\n"
+        "\n"
+        "def mine(x):\n"
+        "    return x\n"
+    )
+    job = {"file_contents": {"a.py": module}, "line_map": [("a.py", 23)]}
+    assert BackgroundWorker._ast_complexity(job) == 1
+
+    job_in_the_mess = {"file_contents": {"a.py": module}, "line_map": [("a.py", 5)]}
+    assert BackgroundWorker._ast_complexity(job_in_the_mess) == 10
+
+
+def test_without_a_line_map_the_whole_file_is_scored():
+    """Manual triggers and e2e.py carry no diff information; score what there is."""
+    job = {"file_contents": {"gnarly.py": _TANGLED_MODULE}}
+    assert BackgroundWorker._ast_complexity(job) == 13
