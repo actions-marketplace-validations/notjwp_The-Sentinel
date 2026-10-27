@@ -1,11 +1,21 @@
 
 # The Sentinel
 
-Event-driven FastAPI code auditing system: multi-engine risk analysis, LLM-enriched
-explanations and fixes, GitHub-native PR comments **and check runs with inline annotations**,
-documentation review against full file text, semantic duplicate detection against the real
-repository, a durable Redis-backed job queue, Prometheus-format metrics, and optional report
-translation.
+[![GitHub Marketplace](https://img.shields.io/badge/Marketplace-Sentinel%20AI%20Code%20Review-purple?logo=github)](https://github.com/marketplace/actions/sentinel-ai-code-review)
+[![CI](https://github.com/notjwp/The-Sentinel/actions/workflows/ci.yml/badge.svg)](https://github.com/notjwp/The-Sentinel/actions/workflows/ci.yml)
+
+AI code review for pull requests: security findings with OWASP classification, technical
+debt, documentation gaps and duplicate-code detection — posted as a PR comment and a native
+check run with inline annotations.
+
+**The quickest way to use it is [as a GitHub Action](#use-it-as-a-github-action)** — four
+lines in a workflow, no server to host and no account to create. The same engines also run
+as an event-driven FastAPI service with a durable Redis-backed job queue, Prometheus-format
+metrics and optional report translation; that path is for running it yourself as an
+always-on GitHub App.
+
+A warm Action run takes roughly 30 seconds, nearly all of it network I/O — the analysis
+engines themselves account for well under a tenth of a second.
 
 ## Architecture
 
@@ -126,9 +136,11 @@ sentinel/
 
 ## Use it as a GitHub Action
 
-The fastest way to run Sentinel on your own repository: no server, nothing to host, and
-no account with anyone. The review runs on GitHub's runners under your repository's own
-token.
+Listed on the Marketplace as
+**[Sentinel AI Code Review](https://github.com/marketplace/actions/sentinel-ai-code-review)**.
+The review runs on GitHub's runners under your repository's own token, so there is no
+server to host and no account to create — and your API key, if you supply one, never
+leaves your repository.
 
 Add `.github/workflows/sentinel.yml`:
 
@@ -172,9 +184,20 @@ Any OpenAI-compatible provider works; see `.env.example` for presets.
 | `llm-api-key` | — | Enables AI explanations and fix suggestions |
 | `llm-base-url` | NVIDIA NIM | Any OpenAI-compatible endpoint |
 | `llm-model` | `nvidia/nemotron-3.5-lightning-30b-a3b` | Model at that endpoint |
+| `llm-max-calls` | `1` | Per-review LLM call budget |
+| `enable-llm` | `true` | Set `false` to skip enrichment even with a key present |
 | `enable-checks` | `true` | Post the native check run |
+| `enable-doc-review` | `true` | Report documentation findings |
+| `python-version` | `3.13` | Passed to `actions/setup-python` |
 
 Outputs: `severity` and `skipped`, for later steps to branch on.
+
+**On the default model.** It reasons before it answers, so a review's LLM call takes
+roughly 15–20 seconds and needs a generous token budget — `LLM_TIMEOUT` defaults to 45s
+for that reason. Point `llm-base-url`/`llm-model` at a non-reasoning model if you would
+rather trade the prose quality for speed. If the model you name has been retired, the
+provider returns `410` and the review falls back to static recommendations rather than
+failing; the job log says so.
 
 ### Exit codes
 
