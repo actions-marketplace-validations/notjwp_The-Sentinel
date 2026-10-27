@@ -453,9 +453,17 @@ class BackgroundWorker:
         """Populate ``job['code']``/``files``/``file_contents`` from the PR. Failure-safe.
 
         Returns whether the review may proceed on trustworthy input: ``False``
-        ONLY when a fetch that should have happened raised. "Nothing to fetch"
-        (no client, code already on the job, owner-less job) is not a failure —
-        neither is a failed corpus build, which stays best-effort.
+        when a fetch that should have happened raised, OR when the client
+        reports it could not list the pull request's files at all. "Nothing to
+        fetch" (no client, code already on the job, owner-less job) is not a
+        failure — neither is a failed corpus build, which stays best-effort,
+        nor a pull request that genuinely changed no code.
+
+        The second case matters more than the first. ``GitHubClient`` is
+        failure-safe by design and swallows HTTP errors into empty results, so
+        an exception is the rare path; an API error is the common one. Treating
+        only the exception as failure is what let a 500 on the files endpoint
+        produce a confident "no issues found".
 
         Fetched data wins over payload-supplied values when non-empty; payload values
         are kept otherwise.
@@ -472,6 +480,13 @@ class BackgroundWorker:
             fetched = github_client.get_pull_request_data(owner, repo_name, pr_number)
         except Exception:
             logger.exception("Failed to fetch PR data for repo=%s pr=%s", repo_name, pr_number)
+            return False
+
+        if fetched is None:
+            logger.error(
+                "Could not read the pull request for repo=%s pr=%s; skipping the review",
+                repo_name, pr_number,
+            )
             return False
 
         code = fetched.get("code")

@@ -301,19 +301,56 @@ def test_get_pull_request_files_success_and_failures(monkeypatch):
     files = client.get_pull_request_files("octo", "repo", 7)
     assert files == [{"filename": "a.py", "patch": "+x = 1"}, {"filename": "b.py"}]
 
-    # None response -> []
+    # A failed first page is None, NOT []: the caller learned nothing, and an
+    # empty list would be indistinguishable from a PR that changed no files.
     monkeypatch.setattr(client, "_http_json_list", lambda *a, **k: None)
-    assert client.get_pull_request_files("octo", "repo", 7) == []
+    assert client.get_pull_request_files("octo", "repo", 7) is None
 
 
-def test_get_pull_request_files_returns_empty_without_owner_or_token(monkeypatch):
+def test_get_pull_request_files_returns_none_without_owner_or_token(monkeypatch):
     client = GitHubClient(app_id="123", installation_id="999", private_key="private")
     monkeypatch.setattr(client, "_get_installation_token", lambda: "installation-token")
-    assert client.get_pull_request_files("", "repo", 7) == []
-    assert client.get_pull_request_files("octo", "", 7) == []
+    assert client.get_pull_request_files("", "repo", 7) is None
+    assert client.get_pull_request_files("octo", "", 7) is None
 
     monkeypatch.setattr(client, "_get_installation_token", lambda: None)
+    assert client.get_pull_request_files("octo", "repo", 7) is None
+
+
+def test_get_pull_request_files_empty_list_still_means_an_empty_pr(monkeypatch):
+    """[] is a real answer and must survive as one."""
+    client = GitHubClient(app_id="123", installation_id="999", private_key="private")
+    monkeypatch.setattr(client, "_get_installation_token", lambda: "token")
+    monkeypatch.setattr(client, "_http_json_list", lambda *a, **k: [])
     assert client.get_pull_request_files("octo", "repo", 7) == []
+    assert client.get_pull_request_data("octo", "repo", 7) == {
+        "code": "",
+        "files": [],
+        "file_contents": {},
+        "line_map": [],
+    }
+
+
+def test_get_pull_request_data_is_none_when_the_listing_fails(monkeypatch):
+    """The regression that made an API outage look like a clean pull request."""
+    client = GitHubClient(app_id="123", installation_id="999", private_key="private")
+    monkeypatch.setattr(client, "get_pull_request_files", lambda *a, **k: None)
+    assert client.get_pull_request_data("octo", "repo", 7) is None
+    assert client.get_pull_request_code("octo", "repo", 7) == ""
+
+
+def test_later_page_failure_keeps_partial_results(monkeypatch):
+    """Only the FIRST page failing means "could not look"."""
+    client = GitHubClient(app_id="123", installation_id="999", private_key="private")
+    monkeypatch.setattr(client, "_get_installation_token", lambda: "token")
+    pages = {1: [{"filename": f"f{i}.py"} for i in range(100)], 2: None}
+    monkeypatch.setattr(
+        client,
+        "_http_json_list",
+        lambda method, url, headers, data=None: pages[int(url.rsplit("page=", 1)[1])],
+    )
+    files = client.get_pull_request_files("octo", "repo", 7)
+    assert files is not None and len(files) == 100
 
 
 def test_get_pull_request_code_assembles_added_lines(monkeypatch):
@@ -621,7 +658,8 @@ def test_get_pull_request_refs_extracts_shas(monkeypatch):
 
 
 def test_get_content_by_url_decodes_base64_with_newlines(monkeypatch):
-    client = GitHubClient(app_id="123", installation_id="999", private_key="private")
+    client = GitHubClient(app_id="123", installation_id="999", private_key="private",
+                          api_base_url="https://api.test")
     monkeypatch.setattr(client, "_get_installation_token", lambda: "installation-token")
 
     encoded = base64.b64encode(b"Install with pip install x\nUsage: run it\n").decode()
@@ -637,7 +675,8 @@ def test_get_content_by_url_decodes_base64_with_newlines(monkeypatch):
 
 
 def test_get_content_by_url_edge_cases(monkeypatch):
-    client = GitHubClient(app_id="123", installation_id="999", private_key="private")
+    client = GitHubClient(app_id="123", installation_id="999", private_key="private",
+                          api_base_url="https://api.test")
     monkeypatch.setattr(client, "_get_installation_token", lambda: "installation-token")
 
     # Genuinely empty file -> "" (NOT None, which signals failure).
@@ -1334,3 +1373,71 @@ def test_eviction_is_lru_not_fifo(monkeypatch):
     assert calls["n"] == before, "r1 was read most recently and must have survived"
     client.get_repo_code_corpus("o", "r", "r2", prefer_paths=["pkg/a.py"])
     assert calls["n"] == before + 1, "r2 was the least recently used and should be gone"
+
+
+# --- Identity validation: these values reach an API URL path ------------------
+
+
+def test_safe_identity_rejects_traversal_and_control_characters():
+    unsafe = [
+        "..",
+        ".",
+        "../..",
+        "../../../../app/installations",
+        "/etc/passwd",
+        "acme\r\nX-Injected: yes",
+        "acme\x00evil",
+        "..%2F..%2Fadmin",
+        "https://evil.example.com/x",
+        "",
+        True,
+        None,
+    ]
+    for value in unsafe:
+        assert GitHubClient._safe_identity(value) is False, value
+
+    for value in ("acme", "The-Sentinel", "my.repo", "a_b-c.d", 7, "main", "a" * 40):
+        assert GitHubClient._safe_identity(value) is True, value
+
+
+def test_hostile_owner_never_reaches_the_wire(monkeypatch):
+    """A traversal in `owner` used to build a request against another endpoint."""
+    client = GitHubClient(app_id="123", installation_id="999", private_key="private")
+    monkeypatch.setattr(client, "_get_installation_token", lambda: "token")
+
+    called = []
+    monkeypatch.setattr(client, "_http_json_list",
+                        lambda *a, **k: called.append(a) or [])
+    monkeypatch.setattr(client, "_http_json", lambda *a, **k: called.append(a) or {})
+
+    assert client.get_pull_request_files("../../../../app/installations", "repo", 7) is None
+    assert client.get_pull_request_refs("..", "repo", 7) == {}
+    assert client.post_comment("../x", "repo", 7, "body") is False
+    assert client.create_check_run("..", "repo", "a" * 40,
+                                   conclusion="success", title="t", summary="s") is False
+    assert client.get_repo_code_corpus("..", "repo", "main") == []
+    assert called == []
+
+
+def test_installation_token_refuses_an_unsafe_installation_id(monkeypatch):
+    client = GitHubClient(app_id="123", installation_id="../../x", private_key="private")
+    monkeypatch.setattr(client, "_http_json", lambda *a, **k: pytest.fail("called"))
+    assert client._get_installation_token() is None
+
+
+def test_content_url_must_stay_on_this_api_host(monkeypatch):
+    """The installation token rides on this request; it must not leave the host."""
+    client = GitHubClient(app_id="1", installation_id="2", private_key="k",
+                          api_base_url="https://api.github.com")
+    monkeypatch.setattr(client, "_get_installation_token", lambda: "token")
+    sent = []
+    monkeypatch.setattr(client, "_http_json",
+                        lambda method, url, headers, data=None: sent.append(url) or
+                        {"encoding": "base64", "content": "aGk="})
+
+    assert client.get_content_by_url("https://evil.example.com/x") is None
+    assert client.get_content_by_url("http://api.github.com.evil.test/x") is None
+    assert sent == []
+
+    assert client.get_content_by_url("https://api.github.com/repos/a/b/contents/c") == "hi"
+    assert len(sent) == 1

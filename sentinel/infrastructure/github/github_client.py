@@ -86,6 +86,9 @@ class GitHubClient:
     # Unified-diff hunk header: '@@ -old_start,old_count +new_start,new_count @@'.
     _HUNK_HEADER_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 
+    # GitHub's own charset for a login, a repository name or a ref.
+    _SAFE_SEGMENT_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
     @classmethod
     def from_access_token(
         cls,
@@ -116,6 +119,25 @@ class GitHubClient:
         # entries never go stale — capacity-bounded only. A plain dict keeps
         # insertion order, and a hit reinserts, which makes eviction LRU.
         self._corpus_cache: dict[tuple[str, str, str, str], list[str]] = {}
+
+    @classmethod
+    def _safe_identity(cls, *segments: object) -> bool:
+        """Is every value safe to interpolate into an API URL path?
+
+        These arrive from a webhook body, and ``urllib`` does not normalise dot
+        segments — the server does. So an unchecked ``owner`` of ``../..``
+        turns ``/repos/{owner}/{repo}/pulls/{n}`` into a request against a
+        completely different endpoint, carrying the installation token with it.
+        A real login cannot contain a slash, and ``.``/``..`` are the two names
+        the charset allows but a repository can never have.
+        """
+        for segment in segments:
+            if isinstance(segment, bool) or not isinstance(segment, (str, int)):
+                return False
+            text = str(segment)
+            if text in (".", "..") or not cls._SAFE_SEGMENT_RE.match(text):
+                return False
+        return True
 
     @staticmethod
     def _now() -> float:
@@ -303,17 +325,28 @@ class GitHubClient:
             return []  # empty body
         return parsed if isinstance(parsed, list) else None
 
-    def _get_paginated(self, endpoint: str, headers: dict[str, str]) -> list[dict[str, Any]]:
+    def _get_paginated(
+        self, endpoint: str, headers: dict[str, str]
+    ) -> list[dict[str, Any]] | None:
         """GET all pages of a GitHub list endpoint (up to MAX_LIST_PAGES).
 
-        Failure-safe: a non-list page (error) ends pagination, returning whatever
-        was collected so far — partial results beat none for a best-effort client.
+        ``None`` when the FIRST page could not be fetched at all — the caller
+        learned nothing and must not treat that as an empty list. A later page
+        failing still returns what was collected, because partial results beat
+        none once we know the endpoint answers.
+
+        The distinction is the same one ``ASTSecurityService.analyze_source``
+        draws between ``None`` and ``[]``, and it exists for the same reason: a
+        review that could not look must never report what a review that looked
+        and found nothing reports.
         """
         results: list[dict[str, Any]] = []
         for page in range(1, self.MAX_LIST_PAGES + 1):
             url = f"{endpoint}?per_page=100&page={page}"
             batch = self._http_json_list("GET", url, headers, data=None)
             if not isinstance(batch, list):
+                if page == 1:
+                    return None
                 break
             results.extend(item for item in batch if isinstance(item, dict))
             if len(batch) < 100:  # short page == last page
@@ -331,7 +364,7 @@ class GitHubClient:
         if self._installation_token and self._now() < (self._installation_token_expiry - 30):
             return self._installation_token
 
-        if not self.installation_id:
+        if not self._safe_identity(self.installation_id):
             return None
 
         app_jwt = self._build_app_jwt()
@@ -366,7 +399,7 @@ class GitHubClient:
         return self._installation_token
 
     def post_comment(self, owner: str, repo: str, pr_number: int, body: str) -> bool:
-        if not owner or not repo or not body:
+        if not body or not self._safe_identity(owner, repo, pr_number):
             return False
 
         token = self._get_installation_token()
@@ -392,8 +425,15 @@ class GitHubClient:
         return isinstance(response, dict) and isinstance(response.get("id"), int)
 
     def list_issue_comments(self, owner: str, repo: str, pr_number: int) -> list[dict[str, Any]]:
-        """GET the issue comments on a PR (all pages, capped). Returns [] on any failure."""
-        if not owner or not repo:
+        """GET the issue comments on a PR (all pages, capped). Returns [] on any failure.
+
+        Deliberately keeps the flat ``[]``-on-failure contract that
+        ``get_pull_request_files`` just gave up: the only caller is
+        ``upsert_comment``, whose documented fallback for a failed lookup is to
+        create a comment rather than update one. Nothing downstream mistakes
+        this list for evidence about the code.
+        """
+        if not self._safe_identity(owner, repo, pr_number):
             return []
 
         token = self._get_installation_token()
@@ -404,7 +444,7 @@ class GitHubClient:
             f"{self.api_base_url.rstrip('/')}/repos/{owner}/{repo}"
             f"/issues/{pr_number}/comments"
         )
-        return self._get_paginated(
+        comments = self._get_paginated(
             endpoint,
             headers={
                 "Accept": "application/vnd.github+json",
@@ -412,10 +452,11 @@ class GitHubClient:
                 "X-GitHub-Api-Version": "2022-11-28",
             },
         )
+        return comments if comments is not None else []
 
     def update_comment(self, owner: str, repo: str, comment_id: int, body: str) -> bool:
         """PATCH an existing issue comment in place. Returns False on any failure."""
-        if not owner or not repo or not body:
+        if not body or not self._safe_identity(owner, repo, comment_id):
             return False
 
         token = self._get_installation_token()
@@ -506,14 +547,23 @@ class GitHubClient:
             text for _, text in GitHubClient._added_lines_with_positions(patch)
         )
 
-    def get_pull_request_files(self, owner: str, repo: str, pr_number: int) -> list[dict[str, Any]]:
-        """GET the changed files of a PR (all pages, capped). Returns [] on any failure."""
-        if not owner or not repo:
-            return []
+    def get_pull_request_files(
+        self, owner: str, repo: str, pr_number: int
+    ) -> list[dict[str, Any]] | None:
+        """GET the changed files of a PR (all pages, capped).
+
+        ``None`` means the listing could not be performed — a rejected identity,
+        no token, or an API error. ``[]`` means GitHub answered and the pull
+        request genuinely changed no files. Callers must keep those apart: a
+        docs-only PR is a real review, an API outage is not.
+        """
+        if not self._safe_identity(owner, repo, pr_number):
+            logger.error("Refusing PR-files fetch for unsafe identity")
+            return None
 
         token = self._get_installation_token()
         if not token:
-            return []
+            return None
 
         endpoint = (
             f"{self.api_base_url.rstrip('/')}/repos/{owner}/{repo}"
@@ -537,7 +587,7 @@ class GitHubClient:
 
     def get_pull_request_refs(self, owner: str, repo: str, pr_number: int) -> dict[str, str]:
         """GET the PR's head/base commit SHAs. Returns {} on any failure."""
-        if not owner or not repo:
+        if not self._safe_identity(owner, repo, pr_number):
             return {}
 
         token = self._get_installation_token()
@@ -583,8 +633,18 @@ class GitHubClient:
         """GET a PR file's full content via its contents_url (pinned to head ref).
 
         Returns the decoded text, "" for an empty file, or None on any failure.
+
+        The URL is pinned to this client's own API host before the token is
+        attached. It arrives from a GitHub response rather than a user, so this
+        is depth rather than a hole — but the request carries the installation
+        token, and the previous ``startswith("http")`` check would have sent it
+        to any host that turned up in that field.
         """
-        if not isinstance(contents_url, str) or not contents_url.startswith("http"):
+        if not isinstance(contents_url, str):
+            return None
+        allowed_prefix = self.api_base_url.rstrip("/") + "/"
+        if not contents_url.startswith(allowed_prefix):
+            logger.error("Refusing to send the installation token to an off-host URL")
             return None
 
         token = self._get_installation_token()
@@ -733,7 +793,7 @@ class GitHubClient:
         partial results beat none; [] when nothing could be fetched. Cached per
         (owner, repo, ref) — a ref pins content, so cache entries never go stale.
         """
-        if not owner or not repo or not ref:
+        if not self._safe_identity(owner, repo, ref):
             return []
 
         # prefer_paths is part of the key: the same ref yields a different
@@ -778,8 +838,15 @@ class GitHubClient:
             self._corpus_cache.pop(next(iter(self._corpus_cache)))
         return corpus
 
-    def get_pull_request_data(self, owner: str, repo: str, pr_number: int) -> dict[str, Any]:
+    def get_pull_request_data(
+        self, owner: str, repo: str, pr_number: int
+    ) -> dict[str, Any] | None:
         """Assemble everything a review needs from one PR-files fetch.
+
+        ``None`` when the PR's files could not be listed. That is distinct from
+        a dict with an empty ``code``, which is a real pull request that added
+        no code — a docs-only change still deserves a full review, an outage
+        does not deserve a clean bill of health.
 
         Returns ``{"code": str, "files": list[str], "file_contents": dict[str, str]}``:
         added-line code joined across patches, the changed file names, and per-file
@@ -794,6 +861,12 @@ class GitHubClient:
         the assembled code resolves to a real file location for check annotations.
         """
         items = self.get_pull_request_files(owner, repo, pr_number)
+        if items is None:
+            logger.error(
+                "Could not list files for %s/%s#%s; reporting a failed fetch rather "
+                "than an empty pull request", owner, repo, pr_number,
+            )
+            return None
         segments: list[str] = []
         files: list[str] = []
         file_contents: dict[str, str] = {}
@@ -836,7 +909,8 @@ class GitHubClient:
 
     def get_pull_request_code(self, owner: str, repo: str, pr_number: int) -> str:
         """Assemble the added-line code introduced by a PR. Returns "" on failure."""
-        return self.get_pull_request_data(owner, repo, pr_number)["code"]
+        data = self.get_pull_request_data(owner, repo, pr_number)
+        return data["code"] if data is not None else ""
 
     def create_check_run(
         self,
@@ -857,7 +931,7 @@ class GitHubClient:
         without it the POST fails and this returns False (callers treat that as
         a skipped, non-fatal step).
         """
-        if not owner or not repo or not head_sha or not conclusion:
+        if not conclusion or not self._safe_identity(owner, repo, head_sha):
             return False
 
         token = self._get_installation_token()
