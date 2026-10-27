@@ -187,7 +187,11 @@ concurrency is not built.
 - **One worker processes one job at a time.** A busy installation delays every
   other tenant's reviews. Splitting the web process from N worker processes is
   the fix, and the code does not support it yet.
-- **A hung worker strands its job** until restart. Crashes are covered
-  (`recover_pending`, dead-letter after 3 attempts); hangs need a visibility
-  timeout, which is not built.
+- **A hung worker's job is reclaimed after 10 minutes.** Both failure modes are
+  covered now: crashes by `recover_pending` at startup, hangs by the lease sweep
+  (`VISIBILITY_TIMEOUT_SECONDS`), both bounded by dead-lettering after 3
+  attempts. Delivery stays at-least-once, so a worker that wakes after its lease
+  lapsed may still post — harmless, because the review comment is an upsert.
+  Watch `sentinel_jobs_reclaimed_total`: anything above zero means a worker
+  wedged, which is worth investigating even though the job was not lost.
 - **Oracle can reclaim idle instances.** There is no SLA on free compute.

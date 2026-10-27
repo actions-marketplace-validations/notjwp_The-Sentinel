@@ -25,6 +25,14 @@ class JobQueue:
         RedisJobQueue (which really does ack) without hasattr branching.
         """
 
+    async def reclaim_expired(self) -> int:
+        """No-op: nothing is leased, because nothing survives this process.
+
+        Present for the same reason as ``ack`` and ``recover_pending`` — callers
+        use one interface for both queues without ``hasattr`` branching.
+        """
+        return 0
+
     async def recover_pending(self) -> int:
         """No-op counterpart to RedisJobQueue.recover_pending. Nothing to recover."""
         return 0

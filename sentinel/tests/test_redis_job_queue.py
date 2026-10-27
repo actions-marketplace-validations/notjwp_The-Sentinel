@@ -342,3 +342,224 @@ def test_poison_message_in_processing_is_dropped_not_requeued():
         assert await client.llen(RedisJobQueue.DEAD_KEY) == 0
 
     asyncio.run(_run())
+
+
+# --- Visibility timeout: the hung worker, not the crashed one ----------------
+#
+# recover_pending drains the processing list wholesale at startup, which is only
+# safe because nothing is running yet. It cannot help a worker that is still
+# alive but wedged — the pipeline runs in a thread via asyncio.to_thread and
+# cannot be cancelled, so without a lease that job sits in processing until
+# somebody restarts the process.
+
+
+class _FakeClock:
+    """Advanceable clock, matching the seam in test_delivery_dedup.py."""
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def _lease_keys(client: fakeredis.FakeAsyncRedis):
+    return client.keys(f"{RedisJobQueue.LEASE_KEY_PREFIX}*")
+
+
+def test_a_dequeued_job_holds_a_lease_until_it_is_acked():
+    async def _run() -> None:
+        client = _fake_client()
+        queue = _queue(client)
+        await queue.enqueue({"repo": "r", "pr_number": 1})
+
+        job = await queue.dequeue()
+        assert len(await _lease_keys(client)) == 1
+        # The lease carries the visibility timeout, not the dedup or quota TTL.
+        (key,) = await _lease_keys(client)
+        assert 0 < await client.ttl(key) <= RedisJobQueue.VISIBILITY_TIMEOUT_SECONDS
+
+        await queue.ack(job)
+        assert await _lease_keys(client) == []
+
+    asyncio.run(_run())
+
+
+def test_an_expired_lease_returns_the_job_to_the_queue():
+    """Deleting the key is how a TTL lapse looks from the outside."""
+    async def _run() -> None:
+        client = _fake_client()
+        queue = _queue(client)
+        await queue.enqueue({"repo": "r", "pr_number": 7})
+        job = await queue.dequeue()
+
+        for key in await _lease_keys(client):
+            await client.delete(key)  # the worker hung; Redis let the lease lapse
+
+        assert await queue.reclaim_expired() == 1
+        assert await queue.depth() == 1
+        recovered = await asyncio.wait_for(queue.dequeue(), timeout=2.0)
+        assert recovered == job
+
+    asyncio.run(_run())
+
+
+def test_a_live_lease_is_never_reclaimed():
+    """The regression that would make every slow review run twice."""
+    async def _run() -> None:
+        client = _fake_client()
+        queue = _queue(client)
+        await queue.enqueue({"repo": "r", "pr_number": 2})
+        await queue.dequeue()
+
+        assert await queue.reclaim_expired() == 0
+        assert await queue.depth() == 0
+        assert await client.llen(RedisJobQueue.PROCESSING_KEY) == 1
+
+    asyncio.run(_run())
+
+
+def test_the_scan_stops_at_the_first_live_lease():
+    """Leases expire in tail order, so a held message shields everything newer.
+
+    Pins the optimisation: if this ever scanned the whole list instead, the
+    oldest-first guarantee would be silently doing nothing.
+    """
+    async def _run() -> None:
+        client = _fake_client()
+        queue = _queue(client)
+        for n in (1, 2):
+            await queue.enqueue({"repo": "r", "pr_number": n})
+        first = await queue.dequeue()   # oldest -> tail of processing
+        await queue.dequeue()           # newest -> head
+
+        # Expire only the NEWER one. The older still holds its lease, so the
+        # scan must stop before reaching it.
+        newer_key = f"{RedisJobQueue.LEASE_KEY_PREFIX}" + json.loads(
+            await client.lindex(RedisJobQueue.PROCESSING_KEY, 0)
+        )["id"]
+        await client.delete(newer_key)
+
+        assert await queue.reclaim_expired() == 0
+        assert first["pr_number"] == 1
+
+    asyncio.run(_run())
+
+
+def test_a_reclaimed_job_survives_the_original_worker_acking_it_late():
+    """The double-processing trap, and the reason the lease is a separate key.
+
+    If a reclaim rewrote the envelope in place, the hung worker's ack — an LREM
+    by the exact string it was handed — would match nothing and pass silently.
+    Here the requeued copy must still be there afterwards.
+    """
+    async def _run() -> None:
+        client = _fake_client()
+        queue = _queue(client)
+        await queue.enqueue({"repo": "r", "pr_number": 3})
+        job = await queue.dequeue()
+
+        for key in await _lease_keys(client):
+            await client.delete(key)
+        assert await queue.reclaim_expired() == 1
+
+        await queue.ack(job)  # the wedged worker finally wakes up
+
+        assert await queue.depth() == 1, "the reclaimed copy must not be acked away"
+
+    asyncio.run(_run())
+
+
+def test_reclaiming_bumps_attempts_and_eventually_dead_letters():
+    async def _run() -> None:
+        client = _fake_client()
+        queue = _queue(client)
+        await queue.enqueue({"repo": "r", "pr_number": 4})
+
+        for _ in range(RedisJobQueue.MAX_ATTEMPTS):
+            await queue.dequeue()
+            for key in await _lease_keys(client):
+                await client.delete(key)
+            await queue.reclaim_expired()
+
+        assert await queue.depth() == 0, "a job that always hangs must stop coming back"
+        assert await client.llen(RedisJobQueue.DEAD_KEY) == 1
+        parked = json.loads(await client.lindex(RedisJobQueue.DEAD_KEY, 0))
+        assert parked["attempts"] == RedisJobQueue.MAX_ATTEMPTS
+        assert parked["job"]["pr_number"] == 4
+
+    asyncio.run(_run())
+
+
+def test_the_sweep_is_rate_limited_by_the_clock():
+    async def _run() -> None:
+        clock = _FakeClock()
+        queue = RedisJobQueue(
+            "redis://unused:6379/0", client=_fake_client(), poll_interval=0.01, clock=clock
+        )
+        calls = {"n": 0}
+
+        async def counting_reclaim() -> int:
+            calls["n"] += 1
+            return 0
+
+        queue.reclaim_expired = counting_reclaim  # type: ignore[method-assign]
+
+        await queue._reclaim_if_due()
+        await queue._reclaim_if_due()
+        assert calls["n"] == 1, "a second sweep inside the interval is wasted work"
+
+        clock.now += RedisJobQueue.RECLAIM_INTERVAL_SECONDS
+        await queue._reclaim_if_due()
+        assert calls["n"] == 2
+
+    asyncio.run(_run())
+
+
+def test_a_poison_message_in_processing_is_discarded_by_the_sweep():
+    async def _run() -> None:
+        client = _fake_client()
+        queue = _queue(client)
+        await client.lpush(RedisJobQueue.PROCESSING_KEY, "{not json")
+
+        assert await queue.reclaim_expired() == 0
+        assert await client.llen(RedisJobQueue.PROCESSING_KEY) == 0
+
+    asyncio.run(_run())
+
+
+def test_a_redis_failure_during_the_sweep_is_contained():
+    """Instrumentation must never break the dequeue loop it runs inside."""
+    class _Broken:
+        async def lindex(self, *a, **k):
+            raise RuntimeError("redis down")
+
+    async def _run() -> None:
+        queue = _queue(_Broken())
+        assert await queue.reclaim_expired() == 0
+
+    asyncio.run(_run())
+
+
+def test_recover_pending_clears_the_lease_it_finds():
+    """A crashed worker's lease outlives it; leaving it would hide the message."""
+    async def _run() -> None:
+        server = fakeredis.FakeServer()
+        client = _fake_client(server)
+        first = _queue(client)
+        await first.enqueue({"repo": "r", "pr_number": 5})
+        await first.dequeue()
+        assert len(await _lease_keys(client)) == 1
+
+        second = _queue(_fake_client(server))  # fresh process after the crash
+        assert await second.recover_pending() == 1
+        assert await _lease_keys(client) == []
+
+    asyncio.run(_run())
+
+
+def test_in_memory_queue_offers_the_same_method():
+    """Interface parity: callers must not need hasattr branching."""
+    from sentinel.workers.job_queue import JobQueue
+
+    assert asyncio.run(JobQueue().reclaim_expired()) == 0
