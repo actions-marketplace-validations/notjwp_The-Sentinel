@@ -692,6 +692,38 @@ class GitHubClient:
 
         return [text for text in texts if text]
 
+    def _rank_corpus_blobs(self, tree: list, prefer_paths: list[str] | None) -> list[str]:
+        """Pick which blobs to fetch for the corpus, best candidates first.
+
+        Rank before truncating. Taking the first N in tree order meant the
+        corpus was whatever sorted earliest — often a directory of __init__.py
+        files — regardless of what the PR touched. Sorting by relevance first
+        spends a fixed budget on the code the PR is most likely to duplicate.
+
+        Every field is re-validated because this is API output: a tree item
+        missing ``size`` is kept rather than skipped, and falls back to the
+        MAX_CONTENT_BYTES truncation when its content is decoded.
+        """
+        candidates: list[tuple[int, str, str]] = []  # (-score, path, sha)
+        for item in tree:
+            if not isinstance(item, dict) or item.get("type") != "blob":
+                continue
+            path = item.get("path")
+            sha = item.get("sha")
+            size = item.get("size")
+            if not isinstance(path, str) or not path.endswith(".py") or path.startswith("."):
+                continue
+            if not isinstance(sha, str) or not sha:
+                continue
+            if isinstance(size, int) and size > self.CORPUS_MAX_FILE_BYTES:
+                continue
+            if self._is_corpus_noise(path):
+                continue
+            candidates.append((-self._corpus_relevance(path, prefer_paths), path, sha))
+
+        candidates.sort()
+        return [sha for _, _, sha in candidates[: self.CORPUS_MAX_FILES]]
+
     def get_repo_code_corpus(
         self, owner: str, repo: str, ref: str, prefer_paths: list[str] | None = None
     ) -> list[str]:
@@ -736,30 +768,7 @@ class GitHubClient:
         if not isinstance(tree, list):
             return []
 
-        candidates: list[tuple[int, str, str]] = []  # (-score, path, sha)
-        for item in tree:
-            if not isinstance(item, dict) or item.get("type") != "blob":
-                continue
-            path = item.get("path")
-            sha = item.get("sha")
-            size = item.get("size")
-            if not isinstance(path, str) or not path.endswith(".py") or path.startswith("."):
-                continue
-            if not isinstance(sha, str) or not sha:
-                continue
-            if isinstance(size, int) and size > self.CORPUS_MAX_FILE_BYTES:
-                continue
-            if self._is_corpus_noise(path):
-                continue
-            candidates.append((-self._corpus_relevance(path, prefer_paths), path, sha))
-
-        # Rank before truncating. Taking the first N in tree order meant the
-        # corpus was whatever sorted earliest — often a directory of __init__.py
-        # files — regardless of what the PR touched. Sorting by relevance first
-        # spends a fixed budget on the code the PR is most likely to duplicate.
-        candidates.sort()
-        blob_shas = [sha for _, _, sha in candidates[: self.CORPUS_MAX_FILES]]
-
+        blob_shas = self._rank_corpus_blobs(tree, prefer_paths)
         corpus = self._fetch_blobs(base, owner, repo, blob_shas, token)
 
         self._corpus_cache[cache_key] = corpus
