@@ -272,6 +272,24 @@ class BackgroundWorker:
         return pull_request, assessment
 
     @staticmethod
+    def _added_lines_by_file(line_map: object) -> dict[str, set[int]]:
+        """The PR's added lines, grouped by path, from a job's line_map.
+
+        Shared by both AST passes: each needs to know which lines the author
+        actually wrote, and a line_map survives a Redis round-trip as lists
+        rather than tuples, so the shape is re-validated rather than trusted.
+        """
+        added_by_file: dict[str, set[int]] = {}
+        if not isinstance(line_map, list):
+            return added_by_file
+        for entry in line_map:
+            if isinstance(entry, (list, tuple)) and len(entry) == 2:
+                path, line_no = entry
+                if isinstance(path, str) and isinstance(line_no, int):
+                    added_by_file.setdefault(path, set()).add(line_no)
+        return added_by_file
+
+    @staticmethod
     def _ast_security_findings(job: dict) -> list:
         """AST findings for every changed .py file whose full source parses.
 
@@ -288,12 +306,7 @@ class BackgroundWorker:
         if not isinstance(file_contents, dict) or not isinstance(line_map, list):
             return []
 
-        added_by_file: dict[str, set[int]] = {}
-        for entry in line_map:
-            if isinstance(entry, (list, tuple)) and len(entry) == 2:
-                path, line_no = entry
-                if isinstance(path, str) and isinstance(line_no, int):
-                    added_by_file.setdefault(path, set()).add(line_no)
+        added_by_file = BackgroundWorker._added_lines_by_file(line_map)
 
         analyzer = ASTSecurityService()
         findings: list = []
@@ -340,14 +353,13 @@ class BackgroundWorker:
             return None
 
         line_map = job.get("line_map")
-        added_by_file: dict[str, set[int]] | None = None
-        if isinstance(line_map, list):
-            added_by_file = {}
-            for entry in line_map:
-                if isinstance(entry, (list, tuple)) and len(entry) == 2:
-                    path, line_no = entry
-                    if isinstance(path, str) and isinstance(line_no, int):
-                        added_by_file.setdefault(path, set()).add(line_no)
+        # None, not {}: "no diff information" means score whole files, while an
+        # empty map would mean "this PR added nothing", which is a different claim.
+        added_by_file = (
+            BackgroundWorker._added_lines_by_file(line_map)
+            if isinstance(line_map, list)
+            else None
+        )
 
         analyzer = ASTDebtService()
         worst: int | None = None
