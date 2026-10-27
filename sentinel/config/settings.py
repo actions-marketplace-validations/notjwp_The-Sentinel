@@ -137,7 +137,7 @@ def get_settings() -> Settings:
         ENABLE_LLM=_to_bool(os.getenv("ENABLE_LLM"), True),
         LLM_MAX_CALLS=_to_int(os.getenv("LLM_MAX_CALLS"), 1),
         LLM_DAILY_QUOTA=_to_int(os.getenv("LLM_DAILY_QUOTA"), 0),
-        LLM_TIMEOUT=_to_float(os.getenv("LLM_TIMEOUT"), 45.0),
+        LLM_TIMEOUT=_to_float(os.getenv("LLM_TIMEOUT"), 90.0),
         LLM_BASE_URL=llm_base_url,
         LLM_MODEL=llm_model,
         LLM_API_KEY=llm_api_key,

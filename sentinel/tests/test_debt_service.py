@@ -69,7 +69,10 @@ def test_pathological_keyword_spam_is_safe():
     spam = ("if if if if " * 5000).strip()
     result = DebtService().evaluate_debt(spam)
     _assert_valid_result(result)
-    assert result["complexity"] == 20001
+    # Was 20001. The raw count is a diff-size proxy, not a complexity, and
+    # printing it beside a real per-function score overstated its precision.
+    assert result["complexity"] == DebtService.MAX_FALLBACK_COMPLEXITY
+    assert result["severity"] == SeverityLevel.HIGH
 
 
 def test_keywords_inside_quotes_are_counted_deterministically():
@@ -205,3 +208,30 @@ def test_an_overridden_result_keeps_the_contract_shape():
     assert set(result.keys()) == {"severity", "complexity", "maintainability"}
     assert type(result["complexity"]) is int
     assert result["severity"] == SeverityLevel.MEDIUM
+
+
+def test_keyword_fallback_is_clamped_to_a_reportable_ceiling():
+    """The fallback counts keywords across the WHOLE blob, so it tracks diff size.
+
+    A large diff used to report a six-figure "complexity" beside a real
+    per-function score, as though the two meant the same thing. Clamping does
+    not make the fallback meaningful — ASTDebtService does that — it stops the
+    report claiming a precision it does not have.
+    """
+    service = DebtService()
+    huge = "if x and y or z:\n    pass\n" * 50000
+
+    complexity = service.calculate_complexity(huge)
+    assert complexity == DebtService.MAX_FALLBACK_COMPLEXITY
+    assert isinstance(complexity, int)
+
+    result = service.evaluate_debt(huge)
+    assert result["complexity"] == DebtService.MAX_FALLBACK_COMPLEXITY
+    assert set(result) == {"complexity", "maintainability", "severity"}
+
+
+def test_the_ceiling_never_touches_a_realistic_score():
+    service = DebtService()
+    ordinary = "if a:\n    pass\n" * 20  # 21, far under the ceiling
+    assert service.calculate_complexity(ordinary) == 21
+    assert service.calculate_complexity("x = 1") == 1

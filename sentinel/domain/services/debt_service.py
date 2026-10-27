@@ -4,12 +4,22 @@ from sentinel.domain.value_objects.severity_level import SeverityLevel
 
 
 class DebtService:
+    # Ceiling on the keyword-count fallback. That count sums every decision
+    # keyword in the whole blob, so it tracks diff SIZE, not tangle: a 10MB
+    # blob of ordinary code scores over a million, and the report prints it
+    # next to a real per-function score as though the two were the same kind
+    # of number. Clamping does not make the fallback meaningful — ASTDebtService
+    # is what does that — but it stops the report stating a six-figure
+    # precision it does not have. Far above any real function's complexity, so
+    # no genuine score is ever touched.
+    MAX_FALLBACK_COMPLEXITY = 999
+
     def calculate_complexity(self, code: str) -> int:
         keywords = ["if", "elif", "for", "while", "except", "and", "or", "case"]
         decision_points = 0
         for keyword in keywords:
             decision_points += len(re.findall(rf"\b{keyword}\b", code))
-        return max(1, 1 + decision_points)
+        return max(1, min(1 + decision_points, self.MAX_FALLBACK_COMPLEXITY))
 
     def calculate_maintainability(self, complexity: int, loc: int) -> float:
         """A rough composite of how branchy the code is and how much of it there is.

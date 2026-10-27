@@ -110,16 +110,24 @@ def _extract_owner(raw_payload: dict[str, Any], fallback_repo: str | None) -> st
 
 
 def _extract_pr_number(raw_payload: dict[str, Any], fallback_pr_number: int | None) -> int | None:
-    if isinstance(fallback_pr_number, int):
+    """Which pull request this delivery is about.
+
+    ``bool`` is rejected at every step because it is a subclass of ``int``:
+    ``{"number": true}`` otherwise reaches the client as a PR number and builds
+    a request for ``/pulls/True``. ``_extract_installation_id`` below and
+    ``action/context.py`` already guard it; this extractor was the one that did
+    not.
+    """
+    if isinstance(fallback_pr_number, int) and not isinstance(fallback_pr_number, bool):
         return fallback_pr_number
 
     pull_request = _as_dict(raw_payload.get("pull_request"))
     number = pull_request.get("number")
-    if isinstance(number, int):
+    if isinstance(number, int) and not isinstance(number, bool):
         return number
 
     top_level_number = raw_payload.get("number")
-    if isinstance(top_level_number, int):
+    if isinstance(top_level_number, int) and not isinstance(top_level_number, bool):
         return top_level_number
 
     return None

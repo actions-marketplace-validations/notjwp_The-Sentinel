@@ -359,3 +359,27 @@ def test_a_met_threshold_still_fails_the_check(monkeypatch, workdir):
 def test_the_threshold_is_canonicalised_before_it_leaves_the_action(value, expected):
     """So the orchestrator never has to know this module's input vocabulary."""
     assert runner._canonical_fail_on(value) == expected
+
+
+def test_no_fail_on_error_also_covers_a_broken_context():
+    """action.yml documents fail-on-error as covering "no PR context" too.
+
+    It only honoured the fetch-failed half: a context error returned EXIT_ERROR
+    before the flag was ever consulted, so the workflow most in need of the
+    escape hatch — one whose triggers do not all carry a pull request — still
+    went red.
+    """
+    env = {"GITHUB_REPOSITORY": "acme/widget"}  # no GITHUB_TOKEN
+
+    assert runner.main(argv=[], env=env) == runner.EXIT_ERROR
+    assert runner.main(argv=["--no-fail-on-error"], env=env) == runner.EXIT_OK
+
+
+def test_no_fail_on_error_covers_every_context_error():
+    for env in (
+        {"GITHUB_REPOSITORY": "acme/widget"},            # no token
+        {"GITHUB_TOKEN": "t"},                            # no repository
+        {"GITHUB_TOKEN": "t", "GITHUB_REPOSITORY": "acme/widget"},  # no PR
+    ):
+        assert runner.main(argv=["--no-fail-on-error"], env=env) == runner.EXIT_OK
+        assert runner.main(argv=[], env=env) == runner.EXIT_ERROR
