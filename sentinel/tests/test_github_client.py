@@ -1226,3 +1226,111 @@ def test_a_failing_corpus_blob_is_dropped_without_sinking_the_rest(monkeypatch):
 def test_fetching_no_blobs_does_not_start_a_pool(monkeypatch):
     client = GitHubClient(app_id="1", installation_id="9", private_key="k")
     assert client._fetch_blobs("https://api.test", "o", "r", [], "tok") == []
+
+
+# --- Corpus cache: hit rate, LRU, and the eviction nobody was testing --------
+
+
+def _counting_corpus_client(monkeypatch, client: GitHubClient) -> dict:
+    """Serve a one-file tree and count how many corpus builds reach the network."""
+    calls = {"n": 0}
+
+    def fake_http_json(method, url, headers=None, **kw):
+        if "git/trees" in url:
+            calls["n"] += 1
+            return {"tree": [{"type": "blob", "path": "pkg/mod/a.py", "sha": "s1", "size": 10}]}
+        return {"content": __import__("base64").b64encode(b"code").decode(), "encoding": "base64"}
+
+    monkeypatch.setattr(client, "_get_installation_token", lambda: "tok")
+    monkeypatch.setattr(client, "_http_json", fake_http_json)
+    return calls
+
+
+def test_two_pushes_touching_different_files_in_one_directory_share_an_entry(monkeypatch):
+    """The hit-rate fix.
+
+    _corpus_relevance reads a changed path's directory and top-level package and
+    nothing else, so these two rankings are identical by construction. Keyed on
+    full paths, the second push missed — which is most of why this cache almost
+    never hit on a real pull request.
+    """
+    client = GitHubClient(app_id="1", installation_id="9", private_key="k")
+    calls = _counting_corpus_client(monkeypatch, client)
+
+    client.get_repo_code_corpus("o", "r", "sha", prefer_paths=["pkg/mod/one.py"])
+    assert calls["n"] == 1
+    client.get_repo_code_corpus("o", "r", "sha", prefer_paths=["pkg/mod/one.py", "pkg/mod/two.py"])
+    assert calls["n"] == 1, "same directories, same ranking — must not refetch"
+
+
+def test_a_different_directory_still_builds_its_own_corpus(monkeypatch):
+    """The guard on the above: a genuinely different ranking is never reused."""
+    client = GitHubClient(app_id="1", installation_id="9", private_key="k")
+    calls = _counting_corpus_client(monkeypatch, client)
+
+    client.get_repo_code_corpus("o", "r", "sha", prefer_paths=["pkg/mod/one.py"])
+    client.get_repo_code_corpus("o", "r", "sha", prefer_paths=["other/dir/one.py"])
+    assert calls["n"] == 2
+
+
+def test_the_preference_key_keeps_lockstep_with_the_relevance_scoring():
+    """Two path lists share a key only if they score every candidate alike.
+
+    If _corpus_relevance ever grows a term the key does not cover, this fails
+    rather than quietly serving one PR's corpus to another.
+    """
+    key = GitHubClient._preference_key
+    candidates = ["pkg/mod/x.py", "pkg/other/y.py", "elsewhere/z.py", "root.py"]
+
+    same = (["pkg/mod/a.py"], ["pkg/mod/b.py", "pkg/mod/c.py"])
+    assert key(same[0]) == key(same[1])
+    for cand in candidates:
+        assert GitHubClient._corpus_relevance(cand, same[0]) == (
+            GitHubClient._corpus_relevance(cand, same[1])
+        ), cand
+
+    differing = (["pkg/mod/a.py"], ["pkg/other/a.py"])
+    assert key(differing[0]) != key(differing[1])
+
+
+def test_preference_key_normalises_separators_and_tolerates_junk():
+    key = GitHubClient._preference_key
+    assert key([r"pkg\mod\a.py"]) == key(["pkg/mod/a.py"])
+    assert key(["root.py"]) == ""          # no directory to prefer
+    assert key([]) == key(None) == ""
+    assert key([None, "", "pkg/a.py"]) == "pkg"   # type: ignore[list-item]
+
+
+def test_the_cache_evicts_past_its_cap(monkeypatch):
+    """Untested until now: changing the bound broke nothing, so a bug would be silent."""
+    client = GitHubClient(app_id="1", installation_id="9", private_key="k")
+    calls = _counting_corpus_client(monkeypatch, client)
+    monkeypatch.setattr(GitHubClient, "CORPUS_CACHE_ENTRIES", 2)
+
+    for ref in ("r1", "r2", "r3"):
+        client.get_repo_code_corpus("o", "r", ref, prefer_paths=["pkg/a.py"])
+    assert calls["n"] == 3
+    assert len(client._corpus_cache) == 2
+
+    client.get_repo_code_corpus("o", "r", "r3", prefer_paths=["pkg/a.py"])
+    assert calls["n"] == 3, "the newest entry should still be cached"
+    client.get_repo_code_corpus("o", "r", "r1", prefer_paths=["pkg/a.py"])
+    assert calls["n"] == 4, "the oldest should have been evicted"
+
+
+def test_eviction_is_lru_not_fifo(monkeypatch):
+    """A frequently-read entry must not be dropped merely for being old."""
+    client = GitHubClient(app_id="1", installation_id="9", private_key="k")
+    calls = _counting_corpus_client(monkeypatch, client)
+    monkeypatch.setattr(GitHubClient, "CORPUS_CACHE_ENTRIES", 2)
+
+    client.get_repo_code_corpus("o", "r", "r1", prefer_paths=["pkg/a.py"])
+    client.get_repo_code_corpus("o", "r", "r2", prefer_paths=["pkg/a.py"])
+    client.get_repo_code_corpus("o", "r", "r1", prefer_paths=["pkg/a.py"])  # r1 is now newest
+    client.get_repo_code_corpus("o", "r", "r3", prefer_paths=["pkg/a.py"])  # evicts r2
+    before = calls["n"]
+
+    client.get_repo_code_corpus("o", "r", "r1", prefer_paths=["pkg/a.py"])
+    assert calls["n"] == before, "r1 was read most recently and must have survived"
+    client.get_repo_code_corpus("o", "r", "r2", prefer_paths=["pkg/a.py"])
+    assert calls["n"] == before + 1, "r2 was the least recently used and should be gone"

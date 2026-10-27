@@ -53,6 +53,11 @@ class GitHubClient:
 
     # Bounds for repo-content fetches (semantic corpus + full doc content).
     CORPUS_MAX_FILES = 20  # most .py blobs fetched per corpus build
+    # Distinct corpora held per client. Deliberately small, because the cost
+    # is multiplicative: one worker keeps up to MAX_CACHED_CLIENTS clients,
+    # each with its own cache, each entry up to CORPUS_MAX_FILES files. Hit
+    # rate is the lever worth pulling here, not capacity — see the key below.
+    CORPUS_CACHE_ENTRIES = 4
     # Concurrent blob fetches. Sized to overlap network latency, not to push
     # throughput: every request spends the same installation token, and the
     # rate limit is per installation rather than per connection.
@@ -107,8 +112,9 @@ class GitHubClient:
     def __post_init__(self) -> None:
         self._installation_token: str | None = None
         self._installation_token_expiry: float = 0.0
-        # Corpus per (owner, repo, ref); a ref pins content, so entries never go
-        # stale — capacity-bounded only (plain dict keeps insertion order).
+        # Corpus per (owner, repo, ref, directories); a ref pins content, so
+        # entries never go stale — capacity-bounded only. A plain dict keeps
+        # insertion order, and a hit reinserts, which makes eviction LRU.
         self._corpus_cache: dict[tuple[str, str, str, str], list[str]] = {}
 
     @staticmethod
@@ -604,6 +610,22 @@ class GitHubClient:
         return filename.startswith("test_") or filename.endswith("_test.py")
 
     @staticmethod
+    def _preference_key(prefer_paths: list[str] | None) -> str:
+        """The part of prefer_paths that can change a ranking, as a cache key.
+
+        Must stay in lockstep with ``_corpus_relevance``: it looks at a changed
+        path's directory and its top-level package, and nothing else. The
+        top-level is a prefix of the directory, so the directory set alone
+        determines every score the ranking can produce.
+        """
+        directories = {
+            p.replace("\\", "/").rsplit("/", 1)[0] if "/" in p.replace("\\", "/") else ""
+            for p in (prefer_paths or [])
+            if isinstance(p, str) and p
+        }
+        return ",".join(sorted(directories))
+
+    @staticmethod
     def _corpus_relevance(path: str, prefer_paths: list[str] | None) -> int:
         """How likely this file is to be what the PR duplicated.
 
@@ -670,41 +692,18 @@ class GitHubClient:
 
         return [text for text in texts if text]
 
-    def get_repo_code_corpus(
-        self, owner: str, repo: str, ref: str, prefer_paths: list[str] | None = None
-    ) -> list[str]:
-        """Fetch the repo's Python sources at a ref (the semantic-duplicate corpus).
+    def _rank_corpus_blobs(self, tree: list, prefer_paths: list[str] | None) -> list[str]:
+        """Pick which blobs to fetch for the corpus, best candidates first.
 
-        Bounded (CORPUS_MAX_FILES / CORPUS_MAX_FILE_BYTES) and failure-safe:
-        partial results beat none; [] when nothing could be fetched. Cached per
-        (owner, repo, ref) — a ref pins content, so cache entries never go stale.
+        Rank before truncating. Taking the first N in tree order meant the
+        corpus was whatever sorted earliest — often a directory of __init__.py
+        files — regardless of what the PR touched. Sorting by relevance first
+        spends a fixed budget on the code the PR is most likely to duplicate.
+
+        Every field is re-validated because this is API output: a tree item
+        missing ``size`` is kept rather than skipped, and falls back to the
+        MAX_CONTENT_BYTES truncation when its content is decoded.
         """
-        if not owner or not repo or not ref:
-            return []
-
-        # prefer_paths is part of the key: the same ref yields a different
-        # corpus for a PR touching a different directory, so keying on the ref
-        # alone would serve one PR's ranking to the next.
-        preference = ",".join(sorted(p for p in (prefer_paths or []) if isinstance(p, str)))
-        cache_key = (owner, repo, ref, preference)
-        cached = self._corpus_cache.get(cache_key)
-        if cached is not None:
-            return cached
-
-        token = self._get_installation_token()
-        if not token:
-            return []
-
-        base = self.api_base_url.rstrip("/")
-        tree_response = self._http_json(
-            "GET",
-            f"{base}/repos/{owner}/{repo}/git/trees/{ref}?recursive=1",
-            headers=self._token_headers(token),
-        )
-        tree = tree_response.get("tree") if isinstance(tree_response, dict) else None
-        if not isinstance(tree, list):
-            return []
-
         candidates: list[tuple[int, str, str]] = []  # (-score, path, sha)
         for item in tree:
             if not isinstance(item, dict) or item.get("type") != "blob":
@@ -722,17 +721,60 @@ class GitHubClient:
                 continue
             candidates.append((-self._corpus_relevance(path, prefer_paths), path, sha))
 
-        # Rank before truncating. Taking the first N in tree order meant the
-        # corpus was whatever sorted earliest — often a directory of __init__.py
-        # files — regardless of what the PR touched. Sorting by relevance first
-        # spends a fixed budget on the code the PR is most likely to duplicate.
         candidates.sort()
-        blob_shas = [sha for _, _, sha in candidates[: self.CORPUS_MAX_FILES]]
+        return [sha for _, _, sha in candidates[: self.CORPUS_MAX_FILES]]
 
+    def get_repo_code_corpus(
+        self, owner: str, repo: str, ref: str, prefer_paths: list[str] | None = None
+    ) -> list[str]:
+        """Fetch the repo's Python sources at a ref (the semantic-duplicate corpus).
+
+        Bounded (CORPUS_MAX_FILES / CORPUS_MAX_FILE_BYTES) and failure-safe:
+        partial results beat none; [] when nothing could be fetched. Cached per
+        (owner, repo, ref) — a ref pins content, so cache entries never go stale.
+        """
+        if not owner or not repo or not ref:
+            return []
+
+        # prefer_paths is part of the key: the same ref yields a different
+        # corpus for a PR touching a different directory, so keying on the ref
+        # alone would serve one PR's ranking to the next.
+        #
+        # Keyed on the DIRECTORIES, not the filenames. _corpus_relevance reads
+        # nothing else — it compares a candidate's directory and its top-level
+        # package, both derivable from the directory — so two path lists that
+        # differ only in filenames rank identically and may share an entry.
+        # Keying on full paths made the key near PR-unique: a second push that
+        # touched one more file missed, which is most of why this cache almost
+        # never hit.
+        cache_key = (owner, repo, ref, self._preference_key(prefer_paths))
+        cached = self._corpus_cache.get(cache_key)
+        if cached is not None:
+            # Reinsert so recency, not age, decides the next eviction.
+            self._corpus_cache[cache_key] = self._corpus_cache.pop(cache_key)
+            return cached
+
+        token = self._get_installation_token()
+        if not token:
+            return []
+
+        base = self.api_base_url.rstrip("/")
+        tree_response = self._http_json(
+            "GET",
+            f"{base}/repos/{owner}/{repo}/git/trees/{ref}?recursive=1",
+            headers=self._token_headers(token),
+        )
+        tree = tree_response.get("tree") if isinstance(tree_response, dict) else None
+        if not isinstance(tree, list):
+            return []
+
+        blob_shas = self._rank_corpus_blobs(tree, prefer_paths)
         corpus = self._fetch_blobs(base, owner, repo, blob_shas, token)
 
         self._corpus_cache[cache_key] = corpus
-        while len(self._corpus_cache) > 4:
+        while len(self._corpus_cache) > self.CORPUS_CACHE_ENTRIES:
+            # First key is the least recently used: writes append, and a hit
+            # above reinserts.
             self._corpus_cache.pop(next(iter(self._corpus_cache)))
         return corpus
 
