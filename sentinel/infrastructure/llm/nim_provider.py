@@ -22,7 +22,7 @@ class NIMProvider(LLMProvider):
     # every review silently fell through to static text. A real two-finding
     # audit needs ~1300 completion tokens, so this leaves headroom rather than
     # sitting just above the observed figure.
-    MAX_TOKENS = 2048
+    MAX_TOKENS = 4096
 
     # Measured: a two-finding audit against the default model takes ~18s wall
     # clock, because reasoning tokens are generated before the first word of
@@ -30,7 +30,7 @@ class NIMProvider(LLMProvider):
     # have cut every call off mid-thought. Enrichment runs off the request
     # path (a worker thread, or the Action's own job), so waiting is cheap;
     # silently degrading to static text is not.
-    DEFAULT_TIMEOUT = 45.0
+    DEFAULT_TIMEOUT = 90.0
 
     def __init__(
         self,

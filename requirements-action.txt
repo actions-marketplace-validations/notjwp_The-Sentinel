@@ -5,4 +5,4 @@
 # (redis). PyJWT is omitted too — github_client guards that import and the
 # action authenticates with a supplied token, never by signing an App JWT.
 scikit-learn==1.7.2
-openai>=2.6.1
+openai>=2.6.1,<4

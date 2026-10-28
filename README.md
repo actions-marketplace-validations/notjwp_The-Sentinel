@@ -193,7 +193,7 @@ Any OpenAI-compatible provider works; see `.env.example` for presets.
 Outputs: `severity` and `skipped`, for later steps to branch on.
 
 **On the default model.** It reasons before it answers, so a review's LLM call takes
-roughly 15–20 seconds and needs a generous token budget — `LLM_TIMEOUT` defaults to 45s
+roughly 20–45 seconds and needs a generous token budget — `LLM_TIMEOUT` defaults to 90s
 for that reason. Point `llm-base-url`/`llm-model` at a non-reasoning model if you would
 rather trade the prose quality for speed. If the model you name has been retired, the
 provider returns `410` and the review falls back to static recommendations rather than
@@ -251,7 +251,7 @@ credentials even when the flag is on.
 | `ENABLE_DOC_REVIEW` | `true` | Enable documentation findings |
 | `ENABLE_TRANSLATION` | `false` | Append translated report sections (needs LLM **and** budget: set `LLM_MAX_CALLS≥3` — 1 enrichment + 1 per language) |
 | `LLM_MAX_CALLS` | `1` | Per-request LLM call budget (shared by enrichment + translation) |
-| `LLM_TIMEOUT` | `45.0` | LLM request timeout (seconds) |
+| `LLM_TIMEOUT` | `90.0` | LLM request timeout (seconds) |
 | `LLM_BASE_URL` | `https://integrate.api.nvidia.com/v1` | LLM endpoint (any OpenAI-compatible provider) |
 | `LLM_MODEL` | `nvidia/nemotron-3.5-lightning-30b-a3b` | Model id at that endpoint |
 | `LLM_API_KEY` | — | LLM credential; **falls back to `NVIDIA_API_KEY`** when unset |

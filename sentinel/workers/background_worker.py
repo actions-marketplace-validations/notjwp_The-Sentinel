@@ -453,9 +453,17 @@ class BackgroundWorker:
         """Populate ``job['code']``/``files``/``file_contents`` from the PR. Failure-safe.
 
         Returns whether the review may proceed on trustworthy input: ``False``
-        ONLY when a fetch that should have happened raised. "Nothing to fetch"
-        (no client, code already on the job, owner-less job) is not a failure —
-        neither is a failed corpus build, which stays best-effort.
+        when a fetch that should have happened raised, OR when the client
+        reports it could not list the pull request's files at all. "Nothing to
+        fetch" (no client, code already on the job, owner-less job) is not a
+        failure — neither is a failed corpus build, which stays best-effort,
+        nor a pull request that genuinely changed no code.
+
+        The second case matters more than the first. ``GitHubClient`` is
+        failure-safe by design and swallows HTTP errors into empty results, so
+        an exception is the rare path; an API error is the common one. Treating
+        only the exception as failure is what let a 500 on the files endpoint
+        produce a confident "no issues found".
 
         Fetched data wins over payload-supplied values when non-empty; payload values
         are kept otherwise.
@@ -474,19 +482,17 @@ class BackgroundWorker:
             logger.exception("Failed to fetch PR data for repo=%s pr=%s", repo_name, pr_number)
             return False
 
-        code = fetched.get("code")
-        if isinstance(code, str) and code.strip():
-            job["code"] = code
-        files = fetched.get("files")
-        if isinstance(files, list) and files:
-            job["files"] = files
-        file_contents = fetched.get("file_contents")
-        if isinstance(file_contents, dict) and file_contents:
-            job["file_contents"] = file_contents
-        line_map = fetched.get("line_map")
-        if isinstance(line_map, list) and line_map:
-            job["line_map"] = line_map
+        if fetched is None:
+            logger.error(
+                "Could not read the pull request for repo=%s pr=%s; skipping the review",
+                repo_name, pr_number,
+            )
+            return False
 
+        BackgroundWorker._apply_fetched_fields(job, fetched)
+
+        code = fetched.get("code")
+        files = fetched.get("files")
         logger.info(
             "Fetched %s chars of PR code across %s files for repo=%s pr=%s",
             len(code) if isinstance(code, str) else 0,
@@ -495,36 +501,78 @@ class BackgroundWorker:
             pr_number,
         )
 
-        # Build the semantic corpus from the base branch (what the PR lands on),
-        # chunked into top-level units. Best-effort: on any failure the job keeps
-        # no corpus and _assess skips duplicate detection entirely.
-        base_sha = job.get("base_sha")
-        if base_sha:
-            try:
-                # Rank the corpus toward what this PR actually touched.
-                corpus_files = github_client.get_repo_code_corpus(
-                    owner, repo_name, base_sha, prefer_paths=job.get("files")
-                )
-                chunks = [
-                    chunk
-                    for content in corpus_files
-                    for chunk in SemanticService.chunk_code_units(content)
-                ]
-                if chunks:
-                    job["existing_code_list"] = chunks[:CORPUS_MAX_UNITS]
-                    logger.info(
-                        "Built semantic corpus of %s units from %s files for repo=%s pr=%s",
-                        len(job["existing_code_list"]),
-                        len(corpus_files),
-                        repo_name,
-                        pr_number,
-                    )
-            except Exception:
-                logger.exception(
-                    "Semantic corpus build failed for repo=%s pr=%s", repo_name, pr_number
-                )
-
+        BackgroundWorker._build_semantic_corpus(
+            job, github_client, owner, repo_name, pr_number
+        )
         return True
+
+    # Fields the fetch may contribute to the job, and the type each must be.
+    _FETCHED_FIELDS = (
+        ("code", str),
+        ("files", list),
+        ("file_contents", dict),
+        ("line_map", list),
+    )
+
+    @staticmethod
+    def _apply_fetched_fields(job: dict, fetched: dict) -> None:
+        """Copy fetched PR data onto the job, keeping payload values otherwise.
+
+        A field is overwritten only when the fetch produced something non-empty,
+        so a caller that supplied its own files or contents does not lose them
+        to a pull request that happened to change nothing of that kind.
+        """
+        for key, expected_type in BackgroundWorker._FETCHED_FIELDS:
+            value = fetched.get(key)
+            if not isinstance(value, expected_type):
+                continue
+            if isinstance(value, str) and not value.strip():
+                continue
+            if not value:
+                continue
+            job[key] = value
+
+    @staticmethod
+    def _build_semantic_corpus(
+        job: dict,
+        github_client: GitHubClient,
+        owner: str,
+        repo_name: str,
+        pr_number: int,
+    ) -> None:
+        """Corpus from the base branch (what the PR lands on), in top-level units.
+
+        Best-effort by design: on any failure the job keeps no corpus and
+        ``_assess`` skips duplicate detection entirely, rather than comparing
+        against a placeholder that could fabricate a HIGH.
+        """
+        base_sha = job.get("base_sha")
+        if not base_sha:
+            return
+        try:
+            # Rank the corpus toward what this PR actually touched.
+            corpus_files = github_client.get_repo_code_corpus(
+                owner, repo_name, base_sha, prefer_paths=job.get("files")
+            )
+            chunks = [
+                chunk
+                for content in corpus_files
+                for chunk in SemanticService.chunk_code_units(content)
+            ]
+            if not chunks:
+                return
+            job["existing_code_list"] = chunks[:CORPUS_MAX_UNITS]
+            logger.info(
+                "Built semantic corpus of %s units from %s files for repo=%s pr=%s",
+                len(job["existing_code_list"]),
+                len(corpus_files),
+                repo_name,
+                pr_number,
+            )
+        except Exception:
+            logger.exception(
+                "Semantic corpus build failed for repo=%s pr=%s", repo_name, pr_number
+            )
 
     @staticmethod
     def _post_review(

@@ -88,3 +88,23 @@ def test_webhook_queue_exception_returns_500_http_error():
 
     assert response.status_code == 500
     assert response.json() == {"detail": "Failed to queue webhook payload"}
+
+
+def test_pr_number_rejects_booleans():
+    """bool is a subclass of int, so `{"number": true}` reached /pulls/True.
+
+    _extract_installation_id and action/context.py both guard this already;
+    this extractor was the one that did not.
+    """
+    from sentinel.api.webhook_controller import _extract_pr_number
+
+    assert _extract_pr_number({"number": True}, None) is None
+    assert _extract_pr_number({"number": False}, None) is None
+    assert _extract_pr_number({"pull_request": {"number": True}}, None) is None
+    assert _extract_pr_number({}, True) is None
+
+    # Real numbers still work, including the falsy one.
+    assert _extract_pr_number({"number": 7}, None) == 7
+    assert _extract_pr_number({"pull_request": {"number": 9}}, None) == 9
+    assert _extract_pr_number({}, 3) == 3
+    assert _extract_pr_number({"number": 0}, None) == 0
