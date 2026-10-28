@@ -17,10 +17,23 @@ class DocumentLLMReviewer(Protocol):
 class DocumentService:
     DOC_EXTENSIONS = (".md", ".txt")
 
+    # `.txt` files that are machine-readable manifests rather than prose. A
+    # dependency pin list has no installation instructions to be missing, so
+    # reviewing one as documentation produced two MEDIUM findings per file on
+    # every PR that touched it — enough to carry the whole review to MEDIUM and
+    # turn the check yellow. Found by Sentinel reviewing its own pull request,
+    # the first one to change a requirements file.
+    NON_PROSE_TXT_PREFIXES = ("requirements", "constraints", "cmakelists")
+
     @staticmethod
     def _is_document_file(file_name: str) -> bool:
         normalized = file_name.strip().lower()
-        return normalized.endswith(DocumentService.DOC_EXTENSIONS)
+        if not normalized.endswith(DocumentService.DOC_EXTENSIONS):
+            return False
+        if not normalized.endswith(".txt"):
+            return True
+        stem = normalized.replace("\\", "/").rsplit("/", 1)[-1].removesuffix(".txt")
+        return not stem.startswith(DocumentService.NON_PROSE_TXT_PREFIXES)
 
     @staticmethod
     def _content_for(file_name: str, file_contents: dict[str, str] | None) -> str | None:

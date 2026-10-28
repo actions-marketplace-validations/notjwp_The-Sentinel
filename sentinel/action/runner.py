@@ -205,7 +205,11 @@ def main(argv: list[str] | None = None, env: Mapping[str, str] | None = None) ->
         context = read_action_context(environment)
     except ActionContextError as exc:
         sys.stderr.write(f"Sentinel: {exc}\n")
-        return EXIT_ERROR
+        # fail-on-error is documented as covering "no PR context, fetch failed".
+        # Honouring it only for the fetch half made the flag useless to the
+        # workflow that most needs it: one whose triggers do not all carry a
+        # pull request.
+        return EXIT_ERROR if args.fail_on_error else EXIT_OK
 
     if context.is_fork:
         logger.warning(

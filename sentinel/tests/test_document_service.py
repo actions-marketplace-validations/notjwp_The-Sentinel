@@ -106,3 +106,39 @@ def test_document_service_handles_unexpected_file_types_and_large_strings():
     # README with no installation/usage should trigger findings; txt empty is allowed
     rules = {finding.rule for finding in findings}
     assert "missing_installation" in rules
+
+
+# --- Dependency manifests are not prose --------------------------------------
+
+
+def test_requirements_files_are_not_reviewed_as_documentation():
+    """Found by Sentinel reviewing its own PR — the first to touch requirements.
+
+    `.txt` is a documentation extension, so a dependency pin list was being
+    judged for "installation instructions" and "usage guidance": two MEDIUM
+    findings per file on every dependency change, enough to carry the review
+    to MEDIUM and turn the check yellow.
+    """
+    service = DocumentService()
+    manifests = [
+        "requirements.txt",
+        "requirements-dev.txt",
+        "requirements-action.txt",
+        "constraints.txt",
+        "CMakeLists.txt",
+        "deploy/requirements.txt",
+        r"deploy\requirements.txt",
+    ]
+    for name in manifests:
+        assert service._is_document_file(name) is False, name
+        assert service.analyze([name], {name: "fastapi==0.121.0\nopenai>=2.6.1,<4\n"}) == []
+
+
+def test_real_documents_are_still_reviewed():
+    service = DocumentService()
+    for name in ("README.md", "docs/DEPLOYMENT.md", "NOTES.txt", "guide.txt",
+                 "requirements_guide.md"):
+        assert service._is_document_file(name) is True, name
+
+    findings = service.analyze(["NOTES.txt"], {"NOTES.txt": "short"})
+    assert findings, "a genuine .txt document should still be reviewed"

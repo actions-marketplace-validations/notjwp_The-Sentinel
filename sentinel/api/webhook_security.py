@@ -31,6 +31,11 @@ async def verify_webhook_signature(request: Request) -> None:
 
     No secret configured -> verification is skipped (dev/test/local). Production
     must set GITHUB_WEBHOOK_SECRET; see the startup warning in main.py.
+
+    Note this cannot be where the body size is bounded: FastAPI reads and
+    caches the whole body before it solves a route's dependencies, so by the
+    time this runs the allocation has already happened. The cap lives in
+    ``BodySizeLimitMiddleware`` instead — see ``sentinel/api/body_limit.py``.
     """
     secret = get_settings().GITHUB_WEBHOOK_SECRET
     if not secret:
