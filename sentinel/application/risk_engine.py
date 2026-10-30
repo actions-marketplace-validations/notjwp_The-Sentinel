@@ -93,6 +93,7 @@ class RiskEngine:
         warn_threshold_seconds: float | None = None,
         extra_security_findings: list | None = None,
         extra_debt_complexity: int | None = None,
+        semantic_code: str | None = None,
     ) -> dict:
         """The single assessment implementation behind assess/assess_resilient.
 
@@ -133,11 +134,21 @@ class RiskEngine:
                 "findings": [*security_result.get("findings", []), *extra_security_findings],
             }
 
+        # The duplicate detector reads a different blob from the other two when
+        # the caller says so, for the same reason extra_security_findings
+        # exists: only the caller knows what each engine should see. The worker
+        # strips AST-covered files out of `code` so no line is reported by two
+        # security engines — but those stripped lines are most of a Python PR,
+        # and withholding them left the duplicate detector with nothing to read.
+        duplicate_source = code if semantic_code is None else semantic_code
+
         semantic_findings: list = []
-        if self.semantic_service and code.strip():
+        if self.semantic_service and duplicate_source.strip():
             semantic_findings = self._run(
                 "Semantic",
-                lambda: self.semantic_service.detect_duplicates(code, existing_code_list or []),
+                lambda: self.semantic_service.detect_duplicates(
+                    duplicate_source, existing_code_list or []
+                ),
                 list, resilient=resilient,
             )
         semantic_severity = (
@@ -179,13 +190,20 @@ class RiskEngine:
         warn_threshold_seconds: float = 0.1,
         extra_security_findings: list | None = None,
         extra_debt_complexity: int | None = None,
+        semantic_code: str | None = None,
     ) -> dict:
-        """Engine failures degrade to safe defaults. Use for background work."""
+        """Engine failures degrade to safe defaults. Use for background work.
+
+        ``semantic_code`` overrides what the duplicate detector reads, leaving
+        the security and debt engines on ``code``. Omit it and every engine
+        sees the same blob, which is what every caller outside the worker does.
+        """
         return self._assess(
             code, existing_code_list,
             resilient=True, warn_threshold_seconds=warn_threshold_seconds,
             extra_security_findings=extra_security_findings,
             extra_debt_complexity=extra_debt_complexity,
+            semantic_code=semantic_code,
         )
 
     def assess(self, code: str = "", existing_code_list: list[str] | None = None) -> dict:

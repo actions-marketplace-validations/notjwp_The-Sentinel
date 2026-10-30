@@ -85,3 +85,6 @@ $RECYCLE.BIN/
 # Local dev helpers for triggering reviews (contain no secrets, read .env)
 trigger.sh
 trigger.ps1
+
+# Presentation/demo scratch (local walkthrough harness and fixture files)
+demo/
