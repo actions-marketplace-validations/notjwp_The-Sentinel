@@ -230,6 +230,18 @@ class BackgroundWorker:
             )
             code = code[:MAX_CODE_LENGTH]
 
+        # The blob as it stood before _strip_ast_covered_lines removed the
+        # AST-covered files. The strip is right for the regex security engine —
+        # it is what stops a line being reported twice — but those lines are
+        # most of a Python PR, and the duplicate detector reading what was left
+        # meant it never fired on the one language the corpus is built from.
+        # Absent (process_job, any caller that did not strip) means "same blob".
+        semantic_code = job.get("semantic_code")
+        if not isinstance(semantic_code, str):
+            semantic_code = None
+        elif len(semantic_code) > MAX_CODE_LENGTH:
+            semantic_code = semantic_code[:MAX_CODE_LENGTH]
+
         # Real corpus fetched from the PR's base ref (M5). With no corpus the
         # semantic engine is skipped outright rather than compared against a
         # stand-in: a tiny placeholder corpus can cross the 0.9 threshold and
@@ -251,6 +263,7 @@ class BackgroundWorker:
                 warn_threshold_seconds=TARGET_LATENCY_SECONDS,
                 extra_security_findings=extra_security_findings,
                 extra_debt_complexity=extra_debt_complexity,
+                semantic_code=semantic_code,
             )
         except Exception:
             logger.exception(
@@ -819,6 +832,11 @@ def run_review(
     # exactly the files the AST engines could read, and the complexity pass
     # works from file_contents, which it does not touch.
     ast_complexity = BackgroundWorker._ast_complexity(job)
+    # Keep the whole blob for the duplicate detector before the strip takes the
+    # AST-covered files out of it. Both engines then read what they should: the
+    # regex pass only the lines no AST engine claimed, the duplicate detector
+    # everything the PR added.
+    job["semantic_code"] = job.get("code")
     BackgroundWorker._strip_ast_covered_lines(job)
 
     pull_request, assessment = BackgroundWorker._assess(

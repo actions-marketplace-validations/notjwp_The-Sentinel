@@ -141,6 +141,15 @@ curl -H "Authorization: Bearer $METRICS_TOKEN" http://localhost:8000/metrics   #
 - Deliberately break it: comment out `GITHUB_WEBHOOK_SECRET` and restart. The
   container must refuse to start. If it boots, `ENVIRONMENT` is not set to
   `production` and the endpoint is accepting unsigned requests.
+- Confirm the body cap holds. An unauthenticated 30 MB post must be refused
+  without the process growing:
+
+  ```bash
+  # 30 MB of filler, no shell escapes involved
+  python3 -c "import sys; sys.stdout.write(chr(65) * 30000000)" > /tmp/big
+  curl -s -o /dev/null -w "%{http_code}" -X POST https://<host>/webhook -H "Content-Type: application/json" --data-binary @/tmp/big
+  # expect: 413
+  ```
 
 ## 8. Going public
 
@@ -194,4 +203,14 @@ concurrency is not built.
   lapsed may still post — harmless, because the review comment is an upsert.
   Watch `sentinel_jobs_reclaimed_total`: anything above zero means a worker
   wedged, which is worth investigating even though the job was not lost.
+- **A review Sentinel could not perform is visible, not silent.** When the PR's
+  files cannot be listed, the review is skipped: no comment, a `neutral` check
+  run titled "Review skipped", and `sentinel_reviews_skipped_total{reason="fetch_failed"}`.
+  Alert on that counter — a sustained non-zero rate means credentials, rate
+  limits or the API itself, and the PRs involved were never actually reviewed.
+- **Unauthenticated request bodies are capped at 25 MB.** The HMAC cannot be
+  checked without the body, so the body is read before the caller is known;
+  `BodySizeLimitMiddleware` bounds that. GitHub refuses to deliver more than
+  25 MB, so nothing legitimate is lost. If you put your own proxy in front,
+  cap it there as well — Caddy does not limit request bodies by default.
 - **Oracle can reclaim idle instances.** There is no SLA on free compute.

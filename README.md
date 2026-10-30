@@ -60,20 +60,30 @@ deduplicated by `X-GitHub-Delivery` (HTTP 200 `{"status": "duplicate"}`, no re-p
 with no work done, so a PR is not re-reviewed every time someone comments on it. A request
 with no `X-GitHub-Event` header is never filtered (local `curl`, manual replays).
 
-1. **Queued (async) mode** — payload has repo/pr_number but **no `code`**. Enqueues a job
-   (durable in Redis when `REDIS_URL` is set); the `BackgroundWorker` then fetches the PR's
-   real diff from GitHub (`GitHubClient.get_pull_request_data`, paginated beyond 100 files),
-   builds the semantic corpus from the base ref, assesses risk, LLM-enriches the findings,
-   and posts back **both** a PR comment and a native **check run** — conclusion
-   `failure`/`neutral`/`success` by severity, with annotations mapped to the exact file lines
-   at the head commit (patch hunk arithmetic). If the PR fetch itself fails, no comment is
-   posted and the check run is `neutral` ("Review skipped") — a GitHub outage never reads as
-   a clean PR.
+**What a review does.** The delivery is enqueued (durably, in Redis, when `REDIS_URL` is
+set); the `BackgroundWorker` then fetches the PR's real diff from GitHub
+(`GitHubClient.get_pull_request_data`, paginated beyond 100 files), builds the semantic
+corpus from the base ref, assesses risk, LLM-enriches the findings, and posts back **both**
+a PR comment and a native **check run** — conclusion `failure`/`neutral`/`success` by
+severity, with annotations mapped to the exact file lines at the head commit (patch hunk
+arithmetic).
+
+**A fetch that fails is reported as a skipped review, never a clean one.** If the PR's files
+cannot be listed — an API error, a bad token, a rate limit — no comment is posted and the
+check run is `neutral` ("Review skipped"). A GitHub outage must never read as a passing PR.
+The client distinguishes "could not look" from "looked, found nothing", so a pull request
+that genuinely changed no code still gets a full review.
+
+**Request bodies are capped at 25 MB** (GitHub's own delivery limit) by middleware that runs
+before the body is read. The HMAC cannot be computed without the body, so the read happens
+while the caller is still unauthenticated — without the cap, anyone who can reach the port
+can make the process allocate.
+
 A synchronous mode that analyzed a `code` field posted in the body was removed in M9:
 it turned a public endpoint into an arbitrary-code-analysis service, and real GitHub
 deliveries never used it.
 
-Both paths post comments via `GitHubClient.upsert_comment`, which tags the comment with a
+Comments are posted via `GitHubClient.upsert_comment`, which tags the comment with a
 hidden marker and **updates Sentinel's existing review in place** on re-runs instead of
 stacking duplicates.
 
@@ -88,6 +98,10 @@ strings, skip, or retry with exponential backoff, never crashing the request.
   webhook dedup state survives restarts too. Safe to re-run because posting is idempotent.
   Retries are bounded: after `MAX_ATTEMPTS` recoveries a job is parked on
   `sentinel:jobs:dead` rather than resurrected forever.
+- **Hung workers are covered too, not just crashed ones**: each in-flight job holds a lease
+  key with a 10-minute TTL, and a sweep run from inside the dequeue poll re-queues anything
+  whose lease has lapsed (`sentinel_jobs_reclaimed_total`). A crash is caught at restart; a
+  wedged process is caught while it is still wedged.
 - **Graceful shutdown**: a job in flight when the process is asked to stop is allowed to
   finish and acknowledge (bounded by `SHUTDOWN_GRACE_SECONDS`) instead of being abandoned.
 - **`GET /metrics`**: Prometheus text format, no client library — jobs processed, per-job
@@ -180,7 +194,7 @@ Any OpenAI-compatible provider works; see `.env.example` for presets.
 |---|---|---|
 | `github-token` | `${{ github.token }}` | Reads the PR and posts the review |
 | `fail-on` | `high` | Lowest severity that fails the job: `critical`\|`high`\|`medium`\|`low`\|`never` |
-| `fail-on-error` | `true` | Fail the job when Sentinel cannot run at all |
+| `fail-on-error` | `true` | Fail the job when Sentinel cannot run at all — no PR context, no token, or the PR could not be fetched. Set `false` to exit 0 instead |
 | `llm-api-key` | — | Enables AI explanations and fix suggestions |
 | `llm-base-url` | NVIDIA NIM | Any OpenAI-compatible endpoint |
 | `llm-model` | `nvidia/nemotron-3.5-lightning-30b-a3b` | Model at that endpoint |
@@ -316,7 +330,7 @@ docker compose up --build
 | `GET` | `/` | Root health message |
 | `GET` | `/health` | Health status |
 | `GET` | `/metrics` | Prometheus-format metrics (counters, durations, live queue depth). Requires `Authorization: Bearer $METRICS_TOKEN` when that is set; open otherwise |
-| `POST` | `/webhook` | Receives PR events and queues a review |
+| `POST` | `/webhook` | Receives PR events and queues a review. Bodies over 25 MB are refused with `413` before being read |
 
 ## Test
 
